@@ -510,11 +510,44 @@
         setOff(meta, false);
       }
 
+      // Live clock: the server base only moves when world state changes, so the page advances
+      // the time itself from the last anchor at the configured time scale, re-anchoring whenever
+      // the server delivers a different time. The muggle line shows the real system time.
+      var clockAnchor = null; // { minutes, atMs, scale, time }
+      var muggleEl = el('muggleTime');
+      function pad2(n) { return (n < 10 ? '0' : '') + n; }
+      function clockText() {
+        if (!clockAnchor) return null;
+        var elapsedSec = (Date.now() - clockAnchor.atMs) / 1000;
+        var total = (clockAnchor.minutes + elapsedSec * clockAnchor.scale) % 1440;
+        if (total < 0) total += 1440;
+        return pad2(Math.floor(total / 60)) + ':' + pad2(Math.floor(total % 60));
+      }
+      function anchorClock(world) {
+        if (!world || !Number.isFinite(Number(world.hour)) || !Number.isFinite(Number(world.minute))) return;
+        var timeStr = String(world.time || '');
+        var scale = Number(world.timeScale);
+        if (!isFinite(scale) || scale <= 0) scale = 1;
+        if (!clockAnchor || clockAnchor.time !== timeStr) {
+          clockAnchor = { minutes: Number(world.hour) * 60 + Number(world.minute), atMs: Date.now(), scale: scale, time: timeStr };
+        }
+      }
+      setInterval(function () {
+        if (!document.body.classList.contains('editing') && !el('hud-root').classList.contains('show')) return;
+        var text = clockText();
+        if (text) el('clock').textContent = text;
+        if (muggleEl) {
+          var now = new Date();
+          muggleEl.textContent = 'Muggle \u00b7 ' + pad2(now.getHours()) + ':' + pad2(now.getMinutes());
+        }
+      }, 1000);
+
       function renderWorld(world) {
         var widget = el('w-world');
         if (!world) { setOff(widget, true); return; }
         setOff(widget, false);
-        el('clock').textContent = world.time || '--:--';
+        anchorClock(world);
+        el('clock').textContent = clockText() || world.time || '--:--';
         var raw = String(world.weather || '').toLowerCase();
         var icon = WEATHER_ICONS[raw] || '\u2726';
         el('weather').textContent = icon + ' ' + (WEATHER_PT[raw] || world.weather || '');

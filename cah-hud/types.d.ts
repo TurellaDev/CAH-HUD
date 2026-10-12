@@ -45,7 +45,7 @@ export interface HmpHudYearTestConfig {
 export interface HmpHudConfig {
     updateIntervalMs?: number;
     inventoryRefreshMs?: number;
-    money?: { enabled?: boolean; item?: string; label?: string };
+    money?: { enabled?: boolean; item?: string; label?: string; currency?: string; source?: "auto" | "banking" | "inventory" };
     inventory?: { enabled?: boolean; metric?: HmpHudInventoryMetric };
     health?: { enabled?: boolean; max?: number };
     xp?: { enabled?: boolean };

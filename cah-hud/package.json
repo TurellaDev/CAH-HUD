@@ -13,6 +13,7 @@
       { "name": "hmp-core", "version": "0.8.1" },
       { "name": "hmp-spawn", "version": "0.8.1" },
       { "name": "hmp-inventory", "version": "0.8.1" },
+      { "name": "hmp-banking", "version": "0.8.1" },
       { "name": "hmp-progression", "version": "0.8.1" },
       { "name": "hmp-world", "version": "0.8.1" },
       { "name": "hmp-blips", "version": "0.8.1" }
