@@ -1,0 +1,1091 @@
+<!doctype html>
+<!--
+  hmp-hud page - modular wizard overlay (pt-PT).
+  Driven from dist/client.js:
+    native -> page : Web.emit(view, "hmp-hud:state", state)      (live render state)
+                     Web.emit(view, "hmp-hud:edit", { enabled, layout })   (enter/leave /menu editor)
+                     Web.emit(view, "hmp-hud:saved", { ok, error })        (layout save acknowledgement)
+    page  -> native: callEvent("ready", "{}")                    (once, so state is pushed after listeners attach)
+                     callEvent("hmp-hud:layout", { action:"save", layout })  (Guardar button)
+                     callEvent("hmp-hud:menu-exit", "{}")                  (Concluir button / ESC)
+  The HUD is a set of independent, freely placeable widgets (money/satchel, clock & weather,
+  school year, health, wizard level/XP, class timetable). Every widget renders only when the
+  state carries its data; hidden widgets appear faded as placeholders while editing.
+  Layout shape (percentages of the screen, top-left anchored):
+    { version: 1, widgets: { world: { x, y, centerX? }, year: {...}, stats: {...},
+                              vitals: {...}, progress: {...}, classes: {...} } }
+  State shape (all fields optional):
+    {
+      active: true,
+      layout: { ... } | null,
+      character: { id, name } | null,
+      money: { amount, label } | null,
+      inventory: { used, slots, weight, maxWeight, metric: "slots"|"weight" } | null,
+      health: number|null, healthMax: number,
+      xp: { level, points, start, end, fraction } | null,
+      year: { school, schoolLabel, calendar: { day, month, year } } | null,
+      world: { time, weather, date: { day, month, year }, season } | null,
+      classes: { current: {...}|null, next: {...}|null } | null
+    }
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+      -webkit-user-select: none; user-select: none; cursor: default; }
+    :root { --ornate: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='90'%20height='90'%3E%3Crect%20x='1'%20y='1'%20width='88'%20height='88'%20fill='none'%20stroke='%235a441f'%20stroke-width='1.4'/%3E%3Crect%20x='4.5'%20y='4.5'%20width='81'%20height='81'%20fill='none'%20stroke='%23c9a25a'%20stroke-width='1.6'/%3E%3Crect%20x='8.5'%20y='8.5'%20width='73'%20height='73'%20fill='none'%20stroke='%237a5f2c'%20stroke-width='1'/%3E%3Cpath%20d='M4.5%2026%20C4.5%2010%2010%204.5%2026%204.5'%20fill='none'%20stroke='%23ecd394'%20stroke-width='2'/%3E%3Cpath%20d='M85.5%2026%20C85.5%2010%2080%204.5%2064%204.5'%20fill='none'%20stroke='%23ecd394'%20stroke-width='2'/%3E%3Cpath%20d='M4.5%2064%20C4.5%2080%2010%2085.5%2026%2085.5'%20fill='none'%20stroke='%23ecd394'%20stroke-width='2'/%3E%3Cpath%20d='M85.5%2064%20C85.5%2080%2080%2085.5%2064%2085.5'%20fill='none'%20stroke='%23ecd394'%20stroke-width='2'/%3E%3Cpath%20d='M4.5%200.5%20L8.5%204.5%20L4.5%208.5%20L0.5%204.5%20Z'%20fill='%23ecd394'/%3E%3Cpath%20d='M85.5%200.5%20L89.5%204.5%20L85.5%208.5%20L81.5%204.5%20Z'%20fill='%23ecd394'/%3E%3Cpath%20d='M4.5%2081.5%20L8.5%2085.5%20L4.5%2089.5%20L0.5%2085.5%20Z'%20fill='%23ecd394'/%3E%3Cpath%20d='M85.5%2081.5%20L89.5%2085.5%20L85.5%2089.5%20L81.5%2085.5%20Z'%20fill='%23ecd394'/%3E%3Ccircle%20cx='45'%20cy='4.5'%20r='1.2'%20fill='%23c9a25a'/%3E%3Ccircle%20cx='45'%20cy='85.5'%20r='1.2'%20fill='%23c9a25a'/%3E%3Ccircle%20cx='4.5'%20cy='45'%20r='1.2'%20fill='%23c9a25a'/%3E%3Ccircle%20cx='85.5'%20cy='45'%20r='1.2'%20fill='%23c9a25a'/%3E%3C/svg%3E");
+      --txt-outline: 1px 1px 0 rgba(0, 0, 0, 0.8), -1px 1px 0 rgba(0, 0, 0, 0.8),
+        1px -1px 0 rgba(0, 0, 0, 0.8), -1px -1px 0 rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.85); }
+
+    /* ------------------------------------------------------------------ */
+    /* HUD root: invisible to input while playing, interactive when editing */
+    /* ------------------------------------------------------------------ */
+    #hud-root { position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      transition: opacity .3s ease; font-family: Georgia, 'Times New Roman', serif; color: #d5c8a9; }
+    #hud-root.show { opacity: 1; }
+    body.editing #hud-root { opacity: 1; }
+
+    .widget { position: absolute; pointer-events: none; }
+    .widget.centered { transform: translateX(-50%); }
+    .widget.off { display: none; }
+    /* Widgets float straight on the game view: no plaque, only the content shows.
+       The box stays only as the drag/grab area (outlined while editing). */
+    .wpanel { background: none; border: 0 solid transparent; padding: 0; min-width: 150px; }
+
+    body.editing #hud-root { pointer-events: auto; }
+    body.editing .widget { pointer-events: auto; cursor: grab; }
+    body.editing .widget.dragging { cursor: grabbing; z-index: 50; }
+    body.editing .widget .wpanel { border-width: 1px; border-style: dashed;
+      border-color: rgba(232, 207, 143, 0.85); border-radius: 2px; padding: 3px 6px 4px; }
+    body.editing .widget.off { display: block !important; opacity: 0.45; }
+
+    /* ------------------------------------------------------------------ */
+    /* Shared widget styling                                              */
+    /* ------------------------------------------------------------------ */
+    .badge { font-family: Georgia, 'Times New Roman', serif; font-size: 9px; letter-spacing: .14em;
+      text-transform: uppercase; padding: 2px 9px 3px; border-radius: 2px;
+      border: 1px solid rgba(201, 162, 90, 0.60); color: #f0dfa9;
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.20), rgba(201, 162, 90, 0.05));
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.55), inset 0 -1px 0 rgba(232, 207, 143, 0.15);
+      display: inline-block; }
+    .badge.plain { border-color: rgba(213, 200, 169, 0.28); color: #b3a687; background: rgba(0, 0, 0, 0.25); }
+    .badge.live { border-color: rgba(126, 217, 87, 0.60); color: #b9e79b;
+      background: linear-gradient(180deg, rgba(126, 217, 87, 0.18), rgba(126, 217, 87, 0.05)); }
+    .badge.gold { border-color: rgba(232, 207, 143, 0.75); color: #f5e6b8;
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.30), rgba(201, 162, 90, 0.08)); }
+
+    /* Qualification light: glows green once the end-of-year test is passed. */
+    .light { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: 0 0 auto;
+      background: radial-gradient(circle at 32% 30%, #f2fff4, #53ff7a 45%, #1d6b30 85%);
+      box-shadow: 0 0 9px 2px rgba(83, 255, 122, 0.65), inset 0 0 2px 1px rgba(255, 255, 255, 0.35); }
+    .light.red { background: radial-gradient(circle at 32% 30%, #fff0ee, #ff5a4d 45%, #7a1d1d 85%);
+      box-shadow: 0 0 9px 2px rgba(255, 90, 77, 0.60), inset 0 0 2px 1px rgba(255, 255, 255, 0.35); }
+    .badge.year-ok { border-color: rgba(126, 217, 87, 0.80); color: #d9ffd0;
+      background: linear-gradient(180deg, rgba(126, 217, 87, 0.32), rgba(126, 217, 87, 0.08));
+      box-shadow: 0 0 10px rgba(83, 255, 122, 0.35), inset 0 1px 0 rgba(0, 0, 0, 0.45); }
+
+    .worldrow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .clock { font-family: Consolas, 'Courier New', monospace; font-size: 20px; color: #f3e6c4;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), var(--txt-outline); }
+    .weather { font-size: 11px; color: #d6c9a4; letter-spacing: .04em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), var(--txt-outline); }
+    .subrow { display: flex; gap: 6px; align-items: baseline; margin-top: 2px; font-size: 9px;
+      letter-spacing: .12em; text-transform: uppercase; color: #b39358;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+
+    .statrow { display: flex; justify-content: space-between; align-items: baseline; margin: 4px 0; gap: 14px; }
+    .k { font-size: 8px; letter-spacing: .12em; text-transform: uppercase; color: #c9a25a;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+    .v { font-family: Consolas, 'Courier New', monospace; font-size: 13px; color: #f3e6c4;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), var(--txt-outline); }
+
+    /* ------------------------------------------------------------------ */
+    /* Ornate fantasy bars: metallic gold frame with pointed tips and a   */
+    /* textured fill (mottled colour, gloss, segment notches, sparkles).  */
+    /* ------------------------------------------------------------------ */
+    .bar { position: relative; height: 10px; margin: 5px 0 6px;
+      background: linear-gradient(180deg, #77591f, #ecd394 30%, #b3893c 55%, #57401c 88%, #8a6d3b);
+      clip-path: polygon(0 50%, 13px 8%, calc(100% - 13px) 8%, 100% 50%, calc(100% - 13px) 92%, 13px 92%);
+      filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55)); }
+    .bar.tall { height: 13px; }
+    .fill { position: absolute; top: 2px; bottom: 2px; left: 4px; width: 0%; transition: width .45s ease;
+      clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 0 100%); }
+    .fill.inv { background:
+      linear-gradient(180deg, rgba(255, 235, 180, 0.45), rgba(255, 255, 255, 0) 46%),
+      repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 12%),
+      radial-gradient(ellipse at 22% 72%, rgba(255, 196, 100, 0.55), transparent 55%),
+      radial-gradient(ellipse at 68% 26%, rgba(255, 224, 150, 0.50), transparent 52%),
+      radial-gradient(ellipse at 88% 70%, rgba(180, 110, 30, 0.6), transparent 55%),
+      linear-gradient(90deg, #7c4a12, #d99a34 30%, #a8721f 62%, #c98e2c 86%); }
+    .fill.hp { background:
+      linear-gradient(180deg, rgba(255, 200, 180, 0.40), rgba(255, 255, 255, 0) 46%),
+      repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.24) 0 1px, transparent 1px 12%),
+      radial-gradient(ellipse at 24% 70%, rgba(255, 120, 90, 0.55), transparent 55%),
+      radial-gradient(ellipse at 70% 28%, rgba(255, 150, 110, 0.45), transparent 52%),
+      linear-gradient(90deg, #5e1717, #b03030 32%, #7e2121 64%, #9c2a2a 86%); }
+    .fill.hp.ok { background:
+      linear-gradient(180deg, rgba(220, 255, 200, 0.40), rgba(255, 255, 255, 0) 46%),
+      repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 12%),
+      radial-gradient(ellipse at 24% 70%, rgba(150, 220, 110, 0.5), transparent 55%),
+      radial-gradient(ellipse at 70% 28%, rgba(190, 240, 150, 0.4), transparent 52%),
+      linear-gradient(90deg, #2d5420, #5f9c3a 32%, #3f6d28 64%, #549034 86%); }
+    .fill.xp { background:
+      linear-gradient(180deg, rgba(235, 225, 255, 0.42), rgba(255, 255, 255, 0) 46%),
+      repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.24) 0 1px, transparent 1px 12%),
+      radial-gradient(2px 2px at 14% 58%, rgba(255, 255, 255, 0.9), transparent 60%),
+      radial-gradient(1.6px 1.6px at 33% 30%, rgba(255, 255, 255, 0.75), transparent 60%),
+      radial-gradient(2px 2px at 56% 68%, rgba(255, 255, 255, 0.8), transparent 60%),
+      radial-gradient(1.6px 1.6px at 79% 36%, rgba(255, 255, 255, 0.75), transparent 60%),
+      radial-gradient(1.8px 1.8px at 93% 64%, rgba(255, 255, 255, 0.65), transparent 60%),
+      radial-gradient(ellipse at 26% 70%, rgba(150, 120, 235, 0.5), transparent 55%),
+      linear-gradient(90deg, #32215e, #6d55b0 32%, #4a3584 64%, #5d47a0 86%); }
+
+    .xpnote { display: flex; justify-content: space-between; font-family: Consolas, 'Courier New', monospace;
+      font-size: 9px; color: #b3a07a; margin-top: 2px;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+
+    .row1 { display: flex; align-items: center; gap: 7px; margin-bottom: 2px; }
+    .csubject { font-size: 12px; color: #f3e6c4; letter-spacing: .02em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), var(--txt-outline); }
+    .cmeta { font-size: 9px; color: #b3a07a; letter-spacing: .04em; line-height: 1.35;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+
+    .spellspanel { padding: 0; }
+    #flameCanvas { display: block; width: 196px; height: 54px; }
+    .spellnames { display: flex; margin-top: 2px; }
+    .spellnames span { flex: 1 1 0; text-align: center; font-size: 8px; letter-spacing: .08em;
+      text-transform: uppercase; color: #c9a25a; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; padding: 0 2px;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+
+    /* ------------------------------------------------------------------ */
+    /* Layout editor (/menu)                                              */
+    /* ------------------------------------------------------------------ */
+    #editor { position: fixed; inset: 0; display: none; z-index: 100; pointer-events: none; }
+    body.editing #editor { display: block; }
+
+    #edGrid { position: absolute; inset: 0; display: none; pointer-events: none;
+      background-image: linear-gradient(rgba(201, 162, 90, 0.09) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(201, 162, 90, 0.09) 1px, transparent 1px);
+      background-size: 5% 5%; }
+    body.editing #edGrid { display: block; }
+
+    .edbar { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center;
+      justify-content: space-between; gap: 16px; padding: 10px 16px; pointer-events: auto;
+      background: linear-gradient(180deg, rgba(12, 9, 5, 0.95), rgba(7, 5, 3, 0.85));
+      border-bottom: 1px solid rgba(201, 162, 90, 0.65);
+      box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(232, 207, 143, 0.12),
+        0 6px 24px rgba(0, 0, 0, 0.55); }
+    .edtitle { font-size: 15px; color: #f0dfa9; letter-spacing: .05em; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+    .edhint { font-size: 10px; color: #b39358; margin-left: 10px; letter-spacing: .06em; }
+    .edactions { display: flex; gap: 8px; }
+    .edactions button, .mactions button { font-family: Georgia, 'Times New Roman', serif; font-size: 12px;
+      letter-spacing: .06em; color: #f0dfa9; text-shadow: 0 1px 0 rgba(0, 0, 0, 0.7);
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.20), rgba(201, 162, 90, 0.05));
+      border: 1px solid rgba(201, 162, 90, 0.60); border-radius: 2px; padding: 6px 14px; cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.55), inset 0 -1px 0 rgba(232, 207, 143, 0.15); }
+    .edactions button:hover, .mactions button:hover { border-color: #ecd394; color: #fff3cf;
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.32), rgba(201, 162, 90, 0.10)); }
+    .edactions button.primary { color: #241a0c; font-weight: bold; text-shadow: 0 1px 0 rgba(255, 240, 200, 0.5);
+      background: linear-gradient(180deg, #f0dfa9, #d3ac62 55%, #b3893c);
+      border-color: #ecd394; }
+    .edactions button.primary:hover { filter: brightness(1.07); }
+
+    #edModal { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.55); z-index: 120; pointer-events: auto; }
+    #edModal.on { display: flex; }
+    .mbox { width: min(560px, 80vw); background: linear-gradient(180deg, rgba(23, 19, 12, 0.96), rgba(9, 7, 4, 0.97));
+      border: 16px solid transparent; border-image: var(--ornate) 30 round;
+      padding: 14px 18px 16px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.65); }
+    .mtitle { font-size: 14px; color: #f0dfa9; margin-bottom: 10px; letter-spacing: .06em; }
+    .mdesc { font-size: 11px; color: #a99c7f; margin: -6px 0 10px; line-height: 1.5; }
+    #mText { width: 100%; box-sizing: border-box; height: 180px; background: rgba(0, 0, 0, 0.4);
+      color: #d5c8a9; border: 1px solid rgba(201, 162, 90, 0.45); border-radius: 2px;
+      font-family: Consolas, 'Courier New', monospace; font-size: 11px; padding: 8px; resize: vertical;
+      -webkit-user-select: text; user-select: text; }
+    .mactions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+    .mactions .off { display: none; }
+
+    #edToast { position: absolute; bottom: 46px; left: 50%; transform: translateX(-50%);
+      background: linear-gradient(180deg, rgba(23, 19, 12, 0.95), rgba(9, 7, 4, 0.95));
+      border: 1px solid rgba(201, 162, 90, 0.65); color: #f0dfa9;
+      font-size: 12px; letter-spacing: .05em; padding: 7px 18px; border-radius: 2px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(232, 207, 143, 0.14);
+      opacity: 0; transition: opacity .25s ease; z-index: 130; pointer-events: none; }
+    #edToast.on { opacity: 1; }
+
+    #edQuit { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; letter-spacing: .09em; color: #c9a25a; text-transform: uppercase;
+      background: linear-gradient(180deg, rgba(12, 9, 5, 0.88), rgba(7, 5, 3, 0.88));
+      border: 1px solid rgba(201, 162, 90, 0.45); border-radius: 2px; padding: 3px 14px;
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.6); pointer-events: none; }
+
+    /* ------------------------------------------------------------------ */
+    /* Chat: rendered inside the HUD (the native overlay is hidden).      */
+    /* ------------------------------------------------------------------ */
+    .chatpanel { min-width: 0; width: 330px; padding: 0; }
+    #chat { display: flex; flex-direction: column; gap: 2px; pointer-events: none; }
+    body.chat-open #w-chat { pointer-events: auto; }
+    #chatTabs { display: none; gap: 4px; margin-bottom: 2px; }
+    body.chat-open #chatTabs, body.editing #chatTabs { display: flex; }
+    #chatTabs button { font-family: Georgia, 'Times New Roman', serif; font-size: 9px;
+      letter-spacing: .08em; text-transform: uppercase; color: #b3a07a; cursor: pointer;
+      background: rgba(8, 6, 4, 0.6); border: 1px solid rgba(201, 162, 90, 0.4);
+      border-radius: 2px; padding: 2px 8px; }
+    #chatTabs button.on { color: #f0dfa9; border-color: #ecd394;
+      background: rgba(201, 162, 90, 0.25); }
+    #chatLog { display: flex; flex-direction: column; justify-content: flex-end; gap: 2px;
+      max-height: 210px; overflow: hidden; }
+    .chat-line { font-size: 12px; line-height: 1.45; color: #e8dcc0; padding: 2px 9px;
+      border-radius: 2px; background: rgba(8, 6, 4, 0.45);
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline);
+      opacity: 1; transition: opacity .6s ease; overflow-wrap: break-word; }
+    .chat-line .chat-author { color: #c9a25a; }
+    .chat-line .chat-tag { font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
+      margin-right: 4px; color: #8a7b5f; }
+    .chat-line[data-channel="system"] .chat-tag { color: #9c8f74; }
+    .chat-line[data-channel="local"] .chat-tag { color: #8fbf7f; }
+    .chat-line[data-channel="ooc"] .chat-tag { color: #7fb8e8; }
+    .chat-line.stale { opacity: 0; }
+    body.chat-open .chat-line { opacity: 1; }
+    body.chat-open .chat-line:nth-last-child(n+8) { opacity: 0.35; }
+    #chatInputRow { display: none; pointer-events: auto; margin-top: 3px; }
+    body.chat-open #chatInputRow { display: block; }
+    #chatInput { width: 100%; box-sizing: border-box; background: rgba(8, 6, 4, 0.85);
+      border: 1px solid rgba(201, 162, 90, 0.55); border-radius: 2px; color: #f3e6c4;
+      font-family: Georgia, 'Times New Roman', serif; font-size: 13px; padding: 6px 10px;
+      outline: none; -webkit-user-select: text; user-select: text;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9); }
+    #chatInput:focus { border-color: #ecd394; }
+    #chatInput::placeholder { color: #8a7b5f; }
+  </style>
+</head>
+<body>
+  <div id="hud-root">
+    <div class="widget" id="w-stats" data-widget="stats">
+      <div class="wpanel">
+        <div class="statrow" id="moneyRow"><span class="k">Gale&otilde;es</span><span class="v" id="money">&mdash;</span></div>
+        <div class="statrow" id="invRow"><span class="k">Bolsa</span><span class="v" id="inv">&mdash;</span></div>
+        <div class="bar" id="invBarRow"><div class="fill inv" id="invBar"></div></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-world" data-widget="world">
+      <div class="wpanel">
+        <div class="worldrow">
+          <span class="clock" id="clock">--:--</span>
+          <span class="weather" id="weather"></span>
+        </div>
+        <div class="subrow"><span id="season"></span></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-year" data-widget="year">
+      <div class="wpanel">
+        <div class="row1">
+          <span class="badge gold" id="schoolYear"></span>
+          <span class="light off" id="yearLight"></span>
+        </div>
+        <div class="cmeta" id="yearMeta"></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-vitals" data-widget="vitals">
+      <div class="wpanel">
+        <div class="statrow"><span class="k">Vida</span><span class="v" id="hpText">&mdash;</span></div>
+        <div class="bar tall"><div class="fill hp" id="hpBar"></div></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-progress" data-widget="progress">
+      <div class="wpanel">
+        <div class="statrow"><span class="k">N&iacute;vel de Bruxo</span><span class="v" id="level">&mdash;</span></div>
+        <div class="bar tall"><div class="fill xp" id="xpBar"></div></div>
+        <div class="xpnote"><span id="xpPoints"></span><span id="xpPct"></span></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-classes" data-widget="classes">
+      <div class="wpanel">
+        <div class="row1">
+          <span class="badge" id="classBadge">Pr&oacute;xima</span>
+          <span class="csubject" id="classSubject">&mdash;</span>
+        </div>
+        <div class="cmeta" id="classMeta"></div>
+      </div>
+    </div>
+
+    <div class="widget" id="w-spells" data-widget="spells">
+      <div class="wpanel spellspanel">
+        <canvas id="flameCanvas" width="196" height="54"></canvas>
+        <div class="spellnames" id="spellnames"><span></span><span></span><span></span><span></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="widget" id="w-chat" data-widget="chat">
+    <div class="wpanel chatpanel">
+      <div id="chat">
+        <div id="chatTabs">
+          <button type="button" data-filter="all" class="on">Tudo</button>
+          <button type="button" data-filter="system">Sistema</button>
+          <button type="button" data-filter="local">Local</button>
+          <button type="button" data-filter="ooc">OOC</button>
+        </div>
+        <div id="chatLog"></div>
+        <div id="chatInputRow">
+          <input id="chatInput" type="text" maxlength="256" autocomplete="off" spellcheck="false"
+            placeholder="Mensagem... (Enter envia &middot; ESC fecha &middot; (( )) = OOC)" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="editor">
+    <div id="edGrid"></div>
+    <div class="edbar">
+      <div class="edtitle">Editor do HUD<span class="edhint">arrasta os widgets para os moveres</span></div>
+      <div class="edactions">
+        <button id="edReset" title="Voltar ao layout predefinido">Repor</button>
+        <button id="edImport" title="Importar um layout a partir de JSON">Importar</button>
+        <button id="edExport" title="Exportar o layout atual como JSON">Exportar</button>
+        <button id="edFinish" title="Sair do editor sem guardar">Concluir</button>
+        <button id="edSave" class="primary" title="Guardar o layout atual">Guardar</button>
+      </div>
+    </div>
+    <div id="edQuit">F8 &mdash; sair do editor</div>
+    <div id="edModal">
+      <div class="mbox">
+        <div class="mtitle" id="mTitle">Exportar layout</div>
+        <div class="mdesc" id="mDesc"></div>
+        <textarea id="mText" spellcheck="false"></textarea>
+        <div class="mactions">
+          <button id="mCopy">Copiar</button>
+          <button id="mApply" class="off">Importar</button>
+          <button id="mClose">Fechar</button>
+        </div>
+      </div>
+    </div>
+    <div id="edToast"></div>
+  </div>
+
+  <script>
+    (function () {
+      var WEATHER_ICONS = {
+        clear: "\u2600", sunny: "\u2600", sun: "\u2600",
+        cloud: "\u2601", cloudy: "\u2601", overcast: "\u2601", clouds: "\u2601",
+        rain: "\u2602", rainy: "\u2602", drizzle: "\u2602", shower: "\u2602", showers: "\u2602",
+        storm: "\u26c8", thunder: "\u26c8", thunderstorm: "\u26c8",
+        snow: "\u2744", snowy: "\u2744", blizzard: "\u2744",
+        fog: "\u2243", foggy: "\u2243", mist: "\u2243", misty: "\u2243", haze: "\u2243",
+        wind: "\u2248", windy: "\u2248"
+      };
+      var WEATHER_PT = {
+        clear: "limpo", sunny: "ensolarado", sun: "sol",
+        cloud: "nublado", cloudy: "nublado", overcast: "encoberto", clouds: "nuvens",
+        rain: "chuva", rainy: "chuvoso", drizzle: "chuvisco", shower: "pancada", showers: "pancadas",
+        storm: "tempestade", thunder: "trovoada", thunderstorm: "trovoada",
+        snow: "neve", snowy: "nevado", blizzard: "nevasca",
+        fog: "n\u00e9voa", foggy: "neblina", mist: "bruma", misty: "bruma", haze: "neblina",
+        wind: "vento", windy: "ventoso"
+      };
+      var SEASON_PT = { spring: "Primavera", summer: "Ver\u00e3o", autumn: "Outono", winter: "Inverno" };
+
+      var WIDGET_KEYS = ["world", "year", "stats", "vitals", "progress", "classes", "spells", "chat"];
+      var DEFAULT_LAYOUT = {
+        version: 1,
+        widgets: {
+          world: { x: 50.5, y: 6, centerX: false },
+          year: { x: 78.5, y: 6.5, centerX: false },
+          stats: { x: 85, y: 13, centerX: false },
+          vitals: { x: 15.5, y: 80.5, centerX: false },
+          progress: { x: 16.5, y: 88.5, centerX: false },
+          classes: { x: 5, y: 10, centerX: false },
+          spells: { x: 84, y: 84, centerX: false },
+          chat: { x: 1, y: 40, centerX: false }
+        }
+      };
+      var LOCAL_KEY = "hmp-hud:layout";
+
+      function el(id) { return document.getElementById(id); }
+      function clone(value) { return JSON.parse(JSON.stringify(value)); }
+      function setOff(node, off) { if (off) node.classList.add('off'); else node.classList.remove('off'); }
+      function fmt(value) {
+        try { return Number(value).toLocaleString('pt-PT'); }
+        catch (e) { try { return Number(value).toLocaleString('en-US'); } catch (e2) { return String(value); } }
+      }
+      function humanMinutes(total) {
+        var m = Math.max(0, Math.round(total));
+        if (m >= 60) { var h = Math.floor(m / 60); m = m % 60; return h + 'h' + (m ? ' ' + m + 'm' : ''); }
+        return m + 'm';
+      }
+      function clampPercent(value) {
+        var parsed = Number(value);
+        if (!isFinite(parsed)) return null;
+        return Math.round(Math.min(100, Math.max(0, parsed)) * 2) / 2;
+      }
+
+      // -----------------------------------------------------------------
+      // Layout handling
+      // -----------------------------------------------------------------
+      var currentLayout = clone(DEFAULT_LAYOUT);
+      var editing = false;
+      var drag = null;
+
+      function normalizeLayout(raw) {
+        var out = { version: 1, widgets: {} };
+        var source = raw && typeof raw === 'object' && raw.widgets ? raw.widgets : {};
+        WIDGET_KEYS.forEach(function (key) {
+          var pos = source[key];
+          var x = pos ? clampPercent(pos.x) : null;
+          var y = pos ? clampPercent(pos.y) : null;
+          if (x === null || y === null) { out.widgets[key] = clone(DEFAULT_LAYOUT.widgets[key]); return; }
+          out.widgets[key] = { x: x, y: y, centerX: !!pos.centerX };
+        });
+        return out;
+      }
+
+      function loadLocal() {
+        try {
+          if (!window.localStorage) return null;
+          var raw = window.localStorage.getItem(LOCAL_KEY);
+          return raw ? normalizeLayout(JSON.parse(raw)) : null;
+        } catch (e) { return null; }
+      }
+      function persistLocal() {
+        try { if (window.localStorage) window.localStorage.setItem(LOCAL_KEY, JSON.stringify(currentLayout)); }
+        catch (e) { }
+      }
+
+      function setWidgetPos(key, pos) {
+        var node = el('w-' + key);
+        if (!node) return;
+        currentLayout.widgets[key] = { x: pos.x, y: pos.y, centerX: !!pos.centerX };
+        if (pos.centerX) { node.style.left = '50%'; node.classList.add('centered'); }
+        else { node.style.left = pos.x + '%'; node.classList.remove('centered'); }
+        node.style.top = pos.y + '%';
+      }
+      function applyLayout() {
+        WIDGET_KEYS.forEach(function (key) {
+          var pos = currentLayout.widgets[key];
+          if (pos) setWidgetPos(key, pos);
+        });
+      }
+
+      // -----------------------------------------------------------------
+      // Rendering
+      // -----------------------------------------------------------------
+      function renderYear(year, test) {
+        var widget = el('w-year');
+        var school = year && Number.isFinite(Number(year.school)) && Number(year.school) >= 1;
+        if (!school && !test) { setOff(widget, true); return; }
+        setOff(widget, false);
+        var badge = el('schoolYear');
+        badge.textContent = (year && year.schoolLabel) || (school ? 'Ano ' + Number(year.school) : 'Ano ?');
+        badge.classList.toggle('year-ok', !!(test && test.eligible));
+        var light = el('yearLight');
+        var meta = el('yearMeta');
+        if (!test) { setOff(light, true); setOff(meta, true); return; }
+        light.classList.toggle('red', !test.eligible);
+        setOff(light, false);
+        if (test.eligible) {
+          meta.textContent = 'Luz verde para o Ano ' + test.targetYear;
+        } else {
+          var missing = [];
+          (test.requirements || []).forEach(function (req) {
+            if (req.have < req.need) missing.push(req.subject + ' ' + req.have + '/' + req.need);
+          });
+          meta.textContent = 'Teste para o Ano ' + test.targetYear +
+            (missing.length ? ' \u00b7 falta: ' + missing.join(', ') : '');
+        }
+        setOff(meta, false);
+      }
+
+      function renderWorld(world) {
+        var widget = el('w-world');
+        if (!world) { setOff(widget, true); return; }
+        setOff(widget, false);
+        el('clock').textContent = world.time || '--:--';
+        var raw = String(world.weather || '').toLowerCase();
+        var icon = WEATHER_ICONS[raw] || '\u2726';
+        el('weather').textContent = icon + ' ' + (WEATHER_PT[raw] || world.weather || '');
+        var season = world.season ? (SEASON_PT[String(world.season).toLowerCase()] || world.season) : '';
+        el('season').textContent = season;
+        setOff(el('season'), !season);
+      }
+
+      function renderStats(data) {
+        var money = data.money;
+        var inv = data.inventory;
+        var hasMoney = !!money;
+        var hasInv = !!(inv && (inv.slots > 0 || inv.maxWeight > 0));
+        if (!hasMoney && !hasInv) { setOff(el('w-stats'), true); return; }
+        setOff(el('w-stats'), false);
+        setOff(el('moneyRow'), !hasMoney);
+        if (hasMoney) el('money').textContent = fmt(money.amount) + ' ' + (money.label || '');
+        setOff(el('invRow'), !hasInv);
+        setOff(el('invBarRow'), !hasInv);
+        if (hasInv) {
+          var main = inv.metric === 'weight' && inv.maxWeight > 0
+            ? inv.weight + ' / ' + inv.maxWeight + ' kg'
+            : (inv.slots > 0 ? inv.used + ' / ' + inv.slots : String(inv.used));
+          if (inv.metric !== 'weight' && inv.maxWeight > 0) main += '  \u00b7 ' + inv.weight + '/' + inv.maxWeight + ' kg';
+          el('inv').textContent = main;
+          var ratio = inv.metric === 'weight' && inv.maxWeight > 0
+            ? inv.weight / inv.maxWeight
+            : (inv.slots > 0 ? inv.used / inv.slots : 0);
+          el('invBar').style.width = (Math.min(1, Math.max(0, ratio)) * 100).toFixed(1) + '%';
+        }
+      }
+
+      function renderVitals(data) {
+        var hasHp = data.health !== null && data.health !== undefined;
+        var widget = el('w-vitals');
+        if (!hasHp) { setOff(widget, true); return; }
+        setOff(widget, false);
+        var max = Number(data.healthMax) > 0 ? Number(data.healthMax) : 100;
+        var value = Number(data.health);
+        el('hpText').textContent = String(Math.round(value * 10) / 10);
+        var pct = Math.min(1, Math.max(0, value / max));
+        el('hpBar').style.width = (pct * 100).toFixed(1) + '%';
+        el('hpBar').classList.toggle('ok', pct > 0.5);
+      }
+
+      function renderProgress(xp) {
+        var widget = el('w-progress');
+        if (!xp || !Number.isFinite(Number(xp.level))) { setOff(widget, true); return; }
+        setOff(widget, false);
+        el('level').textContent = 'Nv ' + Number(xp.level);
+        var fraction = Number(xp.fraction);
+        if (!Number.isFinite(fraction)) fraction = 0;
+        el('xpBar').style.width = (Math.min(1, Math.max(0, fraction)) * 100).toFixed(1) + '%';
+        el('xpPoints').textContent = fmt(xp.points) + ' XP';
+        var atTop = xp.end === null && Number.isFinite(Number(xp.start));
+        el('xpPct').textContent = atTop ? 'm\u00e1x' : Math.round(fraction * 100) + '%';
+      }
+
+      function renderClasses(classes) {
+        var widget = el('w-classes');
+        var current = classes && classes.current;
+        var next = classes && classes.next;
+        var target = current || next;
+        if (!target) { setOff(widget, true); return; }
+        setOff(widget, false);
+        var badge = el('classBadge');
+        if (current) {
+          badge.textContent = 'Em aula';
+          badge.className = 'badge live';
+        } else {
+          badge.textContent = 'Pr\u00f3xima';
+          badge.className = 'badge gold';
+        }
+        el('classSubject').textContent = target.subject;
+        var parts = [];
+        if (target.location) parts.push(target.location);
+        if (current) {
+          parts.push('at\u00e9 ' + target.end);
+          parts.push('restam ' + humanMinutes(target.endsInMin));
+        } else {
+          parts.push(target.start);
+          if (Number.isFinite(Number(target.startsInMin))) parts.push('em ' + humanMinutes(target.startsInMin));
+        }
+        el('classMeta').textContent = parts.join(' \u00b7 ');
+      }
+
+      // -----------------------------------------------------------------
+      // Spell flames: four candle flames made purely of additive glow dots.
+      // One canvas, pooled particles, pre-rendered tint sprites, ~30 fps cap
+      // and the loop fully stops whenever the HUD is hidden or the tab hidden.
+      // Each spell owns its colour (curated map, else a stable name hash), so
+      // the same spell burns the same colour wherever it is equipped.
+      // -----------------------------------------------------------------
+      var FLAME_PALETTE = ["#ff9a3c", "#ffd75e", "#7fd8ff", "#c98cff", "#6effa8", "#ff6a8a", "#8fb7ff", "#fff3c9"];
+      var SPELL_COLORS = {
+        incendio: "#ff8a2a", confringo: "#ff5a3c", bombarda: "#ffb347", diffindo: "#ff9a4d",
+        glacius: "#7fd8ff", arrestomomentum: "#9fe8ff", descendo: "#8fb7ff", depulso: "#6f9dff",
+        levioso: "#ffe08a", wingardiumleviosa: "#ffe08a", petrificustotalus: "#ffe08a",
+        accio: "#c98cff", imperio: "#c98cff", revelio: "#8fc7ff", lumos: "#fff3c9",
+        protego: "#7fe3d8", alohomora: "#7fe3c4", transformation: "#6effa8", evanesco: "#6effa8",
+        avadakedavra: "#5dff8f", crucio: "#ff3b57", expelliarmus: "#cfe8ff", basiccast: "#ffd75e"
+      };
+      var flame = { canvas: null, ctx: null, w: 196, h: 54, raf: 0, last: 0, acc: 0, time: 0,
+        cells: [], sprites: {} };
+
+      function spellKey(name) { return String(name || '').toLowerCase().replace(/[^a-z]/g, ''); }
+
+      // The colour belongs to the spell itself: curated for known spells, otherwise a stable
+      // hash of the spell name. The same spell always burns the same colour, in any slot.
+      function spellColor(name) {
+        var key = spellKey(name);
+        var curated = SPELL_COLORS[key];
+        if (curated) return curated;
+        if (!key) return FLAME_PALETTE[0];
+        var h = 0;
+        for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+        return FLAME_PALETTE[Math.abs(h) % FLAME_PALETTE.length];
+      }
+
+      function hexToRgb(hex) {
+        var n = parseInt(hex.slice(1), 16);
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+      }
+
+      function spriteFor(color) {
+        var cached = flame.sprites[color];
+        if (cached) return cached;
+        var rgb = hexToRgb(color);
+        var sprite = document.createElement('canvas');
+        sprite.width = 24;
+        sprite.height = 24;
+        var g = sprite.getContext('2d');
+        var grad = g.createRadialGradient(12, 12, 0, 12, 12, 12);
+        grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+        grad.addColorStop(0.3, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.85)');
+        grad.addColorStop(1, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0)');
+        g.fillStyle = grad;
+        g.fillRect(0, 0, 24, 24);
+        flame.sprites[color] = sprite;
+        return sprite;
+      }
+
+      function initFlames() {
+        if (flame.cells.length) return;
+        for (var i = 0; i < 4; i++) {
+          var parts = [];
+          for (var p = 0; p < 44; p++) {
+            parts.push({ on: false, t: 1, life: 1, x0: 0, y: 0, vy: 0, size: 0, phase: 0, freq: 0, spark: false });
+          }
+          flame.cells.push({ color: FLAME_PALETTE[i], x: 0, spawnAcc: 0, flare: 0,
+            nextFlare: 1.5 + Math.random() * 4, parts: parts, cursor: 0 });
+        }
+      }
+
+      function setupCanvas() {
+        var c = el('flameCanvas');
+        if (!c) return false;
+        if (flame.canvas === c && flame.ctx) return true;
+        var dpr = Math.min(1.5, window.devicePixelRatio || 1);
+        c.width = Math.round(flame.w * dpr);
+        c.height = Math.round(flame.h * dpr);
+        flame.canvas = c;
+        flame.ctx = c.getContext('2d');
+        flame.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        initFlames();
+        for (var i = 0; i < 4; i++) flame.cells[i].x = flame.w / 8 + (flame.w / 4) * i;
+        return true;
+      }
+
+      function spawnParticle(cell) {
+        var parts = cell.parts;
+        for (var tries = 0; tries < parts.length; tries++) {
+          cell.cursor = (cell.cursor + 1) % parts.length;
+          var p = parts[cell.cursor];
+          if (p.on) continue;
+          p.on = true;
+          p.t = 0;
+          p.life = 0.7 + Math.random() * 0.55;
+          p.x0 = (Math.random() - 0.5) * 8;
+          p.y = flame.h - 5;
+          p.vy = 26 + Math.random() * 24;
+          p.size = 7 + Math.random() * 9;
+          p.phase = Math.random() * Math.PI * 2;
+          p.freq = 5 + Math.random() * 6;
+          p.spark = cell.flare > 0 && Math.random() < 0.3;
+          if (p.spark) { p.vy *= 2.1; p.size *= 0.55; p.life *= 0.8; }
+          return;
+        }
+      }
+
+      function stepFlames(dt) {
+        flame.time += dt;
+        for (var i = 0; i < 4; i++) {
+          var cell = flame.cells[i];
+          if (cell.flare > 0) {
+            cell.flare -= dt;
+          } else {
+            cell.nextFlare -= dt;
+            if (cell.nextFlare <= 0) {
+              cell.flare = 0.35 + Math.random() * 0.45;
+              cell.nextFlare = 2.5 + Math.random() * 4.5;
+            }
+          }
+          // empty slots smoulder instead of burning
+          var rate = (cell.lit ? (cell.flare > 0 ? 95 : 36) : 9) * (0.8 + 0.4 * Math.random());
+          cell.spawnAcc += rate * dt;
+          while (cell.spawnAcc >= 1) { cell.spawnAcc -= 1; spawnParticle(cell); }
+          for (var p = 0; p < cell.parts.length; p++) {
+            var q = cell.parts[p];
+            if (!q.on) continue;
+            q.t += dt / q.life;
+            if (q.t >= 1) { q.on = false; continue; }
+            q.y -= q.vy * dt;
+          }
+        }
+      }
+
+      function drawFlames() {
+        var ctx = flame.ctx;
+        if (!ctx) return;
+        ctx.clearRect(0, 0, flame.w, flame.h);
+        ctx.globalCompositeOperation = 'lighter';
+        for (var i = 0; i < 4; i++) {
+          var cell = flame.cells[i];
+          var sprite = spriteFor(cell.color);
+          var lit = cell.lit !== false;
+          var dim = lit ? 1 : 0.38;
+          var flareBoost = cell.flare > 0 ? 1.3 : 1;
+          // warm dot anchoring the wick
+          ctx.globalAlpha = (0.55 + 0.2 * Math.sin(flame.time * 11 + i * 2.1)) * dim;
+          ctx.drawImage(sprite, cell.x - 5, flame.h - 9, 10, 10);
+          for (var p = 0; p < cell.parts.length; p++) {
+            var q = cell.parts[p];
+            if (!q.on) continue;
+            var t = q.t;
+            var x = cell.x + q.x0 * (1 - t * 0.5) + Math.sin(flame.time * q.freq + q.phase) * (1.2 + t * 2.4);
+            var s = q.size * (1 - 0.55 * t) * flareBoost;
+            var a = Math.pow(1 - t, 1.6) * (0.65 + 0.35 * Math.sin(flame.time * 13 + q.phase * 5)) * flareBoost * dim;
+            if (a <= 0.02 || s <= 0.5) continue;
+            ctx.globalAlpha = Math.min(1, a);
+            ctx.drawImage(sprite, x - s / 2, q.y - s / 2, s, s);
+          }
+        }
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
+      function flamesActive() {
+        return (el('hud-root').classList.contains('show') || editing) && !!flame.ctx && !document.hidden;
+      }
+
+      function frameFlames(ts) {
+        flame.raf = 0;
+        if (!flamesActive()) return;
+        if (!flame.last) flame.last = ts;
+        var dt = Math.min(0.12, (ts - flame.last) / 1000);
+        flame.last = ts;
+        flame.acc += dt;
+        if (flame.acc >= 1 / 30) {
+          stepFlames(flame.acc);
+          drawFlames();
+          flame.acc = 0;
+        }
+        flame.raf = requestAnimationFrame(frameFlames);
+      }
+
+      function ensureFlames() {
+        if (!flame.ctx && !setupCanvas()) return;
+        if (flame.raf || !flamesActive()) return;
+        flame.last = 0;
+        flame.raf = requestAnimationFrame(frameFlames);
+      }
+
+      function stopFlames() {
+        if (flame.raf) { cancelAnimationFrame(flame.raf); flame.raf = 0; }
+      }
+
+      function renderSpells(spells) {
+        var widget = el('w-spells');
+        var list = Array.isArray(spells) && spells.length ? spells : null;
+        // Only show the widget once at least one quick-bar slot carries a spell; while editing,
+        // placeholder flames always show so the widget can be arranged.
+        var hasSpell = !!(list && list.some(function (spell) { return spell && spell.name; }));
+        if (!hasSpell && !editing) { setOff(widget, true); stopFlames(); return; }
+        setOff(widget, false);
+        if (!setupCanvas()) { setOff(widget, true); return; }
+        var labels = el('spellnames').getElementsByTagName('span');
+        for (var i = 0; i < 4; i++) {
+          var cell = flame.cells[i];
+          var spell = list ? (list[i] || null) : null;
+          var name = spell && spell.name ? String(spell.name) : '';
+          cell.label = name;
+          cell.lit = editing ? true : !!name;
+          cell.color = name ? spellColor(name) : FLAME_PALETTE[i % FLAME_PALETTE.length];
+          if (labels[i]) { labels[i].textContent = name; setOff(labels[i], !name); }
+        }
+        ensureFlames();
+      }
+
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) ensureFlames(); });
+
+      function render(state) {
+        var root = el('hud-root');
+        if (!state || !state.active) {
+          if (!editing) root.classList.remove('show');
+          return;
+        }
+        root.classList.add('show');
+        renderYear(state.year, state.test);
+        renderWorld(state.world);
+        renderStats(state);
+        renderVitals(state);
+        renderProgress(state.xp);
+        renderClasses(state.classes);
+        renderSpells(state.spells);
+      }
+
+      // -----------------------------------------------------------------
+      // Layout editor
+      // -----------------------------------------------------------------
+      var toastTimer = null;
+      function toast(message) {
+        var node = el('edToast');
+        node.textContent = message;
+        node.classList.add('on');
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { node.classList.remove('on'); }, 2200);
+      }
+
+      function setEditing(on, layout) {
+        editing = !!on;
+        document.body.classList.toggle('editing', editing);
+        closeModal();
+        if (editing) {
+          if (layout) { currentLayout = normalizeLayout(layout); persistLocal(); }
+          applyLayout();
+          el('hud-root').classList.add('show');
+          renderSpells(null); // placeholder flames so the widget is visible while arranging
+          toast('Arrasta os widgets para os moveres.');
+        } else {
+          drag = null;
+        }
+      }
+
+      function callNative(name, payload) {
+        try {
+          if (typeof callEvent === 'function') callEvent(name, payload);
+        } catch (e) { }
+      }
+      function saveLayout() {
+        persistLocal();
+        callNative('hmp-hud:layout', JSON.stringify({ action: 'save', layout: currentLayout }));
+      }
+      function exitMenu() {
+        setEditing(false);
+        callNative('hmp-hud:menu-exit', '{}');
+      }
+
+      function openModal(mode) {
+        el('edModal').classList.add('on');
+        if (mode === 'export') {
+          el('mTitle').textContent = 'Exportar layout';
+          el('mDesc').textContent = 'Copia este JSON e partilha-o com quem quiseres \u2014 qualquer pessoa o pode importar para ter o mesmo layout.';
+          el('mText').value = JSON.stringify(currentLayout, null, 2);
+          el('mCopy').classList.remove('off');
+          el('mApply').classList.add('off');
+        } else {
+          el('mTitle').textContent = 'Importar layout';
+          el('mDesc').textContent = 'Cola aqui um JSON de layout partilhado e clica em Importar.';
+          el('mText').value = '';
+          el('mCopy').classList.add('off');
+          el('mApply').classList.remove('off');
+        }
+        setTimeout(function () { try { el('mText').focus(); } catch (e) { } }, 50);
+      }
+      function closeModal() { el('edModal').classList.remove('on'); }
+
+      function fallbackCopy(text) {
+        var area = el('mText');
+        area.focus();
+        area.select();
+        try { document.execCommand('copy'); } catch (e) { }
+      }
+
+      el('edSave').addEventListener('click', function () {
+        toast('A guardar\u2026');
+        saveLayout();
+      });
+      el('edFinish').addEventListener('click', exitMenu);
+      el('edExport').addEventListener('click', function () { openModal('export'); });
+      el('edImport').addEventListener('click', function () { openModal('import'); });
+      el('mClose').addEventListener('click', closeModal);
+      el('mCopy').addEventListener('click', function () {
+        var text = el('mText').value;
+        var done = function () { toast('JSON copiado para a \u00e1rea de transfer\u00eancia.'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+        } else {
+          fallbackCopy(text);
+          done();
+        }
+      });
+      el('mApply').addEventListener('click', function () {
+        var parsed = null;
+        try { parsed = JSON.parse(el('mText').value); } catch (e) { }
+        if (!parsed || typeof parsed !== 'object' || !parsed.widgets) {
+          toast('JSON inv\u00e1lido: falta a sec\u00e7\u00e3o "widgets".');
+          return;
+        }
+        currentLayout = normalizeLayout(parsed);
+        applyLayout();
+        saveLayout();
+        closeModal();
+        toast('Layout importado e guardado.');
+      });
+      el('edReset').addEventListener('click', function () {
+        currentLayout = clone(DEFAULT_LAYOUT);
+        applyLayout();
+        saveLayout();
+        toast('Layout reposto para o predefinido.');
+      });
+
+      document.addEventListener('keydown', function (ev) {
+        if (!editing) return;
+        // F9 is reserved by the mod (disconnect); F8 leaves the editor and the game's default
+        // ESC behaviour is left untouched.
+        if (ev.key === 'F8') {
+          ev.preventDefault();
+          exitMenu();
+        }
+      });
+
+      // Drag & drop -------------------------------------------------------
+      document.addEventListener('mousedown', function (ev) {
+        if (!editing || ev.button !== 0) return;
+        if (ev.target.closest && ev.target.closest('#editor')) return;
+        var node = ev.target.closest ? ev.target.closest('.widget') : null;
+        if (!node) return;
+        var key = node.dataset ? node.dataset.widget : null;
+        if (!key) return;
+        var rect = node.getBoundingClientRect();
+        drag = { key: key, node: node, dx: ev.clientX - rect.left, dy: ev.clientY - rect.top,
+                 w: rect.width, h: rect.height };
+        node.classList.add('dragging');
+        ev.preventDefault();
+      });
+      document.addEventListener('mousemove', function (ev) {
+        if (!drag) return;
+        var x = ev.clientX - drag.dx;
+        var y = ev.clientY - drag.dy;
+        var maxX = Math.max(0, window.innerWidth - drag.w);
+        var maxY = Math.max(0, window.innerHeight - drag.h);
+        x = Math.min(Math.max(0, x), maxX);
+        y = Math.min(Math.max(0, y), maxY);
+        setWidgetPos(drag.key, {
+          x: Math.round((x / window.innerWidth) * 200) / 2,
+          y: Math.round((y / window.innerHeight) * 200) / 2
+        });
+      });
+      document.addEventListener('mouseup', function () {
+        if (!drag) return;
+        drag.node.classList.remove('dragging');
+        drag = null;
+      });
+
+      // -----------------------------------------------------------------
+      // Native events
+      // -----------------------------------------------------------------
+      window.addEventListener('hmp-hud:state', function (e) {
+        var state = e.detail;
+        // While editing, live drag positions win over the server's last pushed layout.
+        if (state && state.layout && !editing) {
+          currentLayout = normalizeLayout(state.layout);
+          persistLocal();
+        }
+        applyLayout();
+        render(state);
+      });
+      window.addEventListener('hmp-hud:edit', function (e) {
+        var detail = e.detail || {};
+        setEditing(!!detail.enabled, detail.layout);
+      });
+      window.addEventListener('hmp-hud:saved', function (e) {
+        var detail = e.detail || {};
+        toast(detail.ok ? 'Layout guardado.' : ('N\u00e3o foi poss\u00edvel guardar: ' + (detail.error || 'erro desconhecido')));
+      });
+
+      // -----------------------------------------------------------------
+      // Chat (the native overlay is hidden; this is the chat now)
+      // -----------------------------------------------------------------
+      var chatLog = el('chatLog');
+      var chatInputEl = el('chatInput');
+      var chatFilter = 'all';
+      var CHANNEL_TAGS = { system: 'SIS', local: 'LOC', ooc: 'OOC' };
+      function chatChannelOf(entry) {
+        var text = String(entry.text || '');
+        var author = String(entry.author || '');
+        if (!author || text.charAt(0) === '[') return 'system';
+        if (/^\(\(/.test(text) || /\)\)\s*$/.test(text) || /^\[OOC\]/i.test(text)) return 'ooc';
+        return 'local';
+      }
+      function applyChatFilter() {
+        if (!chatLog) return;
+        var lines = chatLog.children;
+        for (var i = 0; i < lines.length; i++) {
+          lines[i].style.display = (chatFilter === 'all' || lines[i].dataset.channel === chatFilter) ? '' : 'none';
+        }
+      }
+      function renderChat(messages) {
+        if (!chatLog) return;
+        chatLog.innerHTML = '';
+        (messages || []).forEach(function (entry) {
+          var channel = chatChannelOf(entry);
+          var line = document.createElement('div');
+          line.className = 'chat-line';
+          line.dataset.channel = channel;
+          var tag = document.createElement('span');
+          tag.className = 'chat-tag';
+          tag.textContent = CHANNEL_TAGS[channel] || '';
+          line.appendChild(tag);
+          if (entry.author) {
+            var author = document.createElement('span');
+            author.className = 'chat-author';
+            author.textContent = entry.author + ': ';
+            line.appendChild(author);
+          }
+          var text = document.createElement('span');
+          text.textContent = entry.text;
+          line.appendChild(text);
+          chatLog.appendChild(line);
+          setTimeout(function () { line.classList.add('stale'); }, 9000);
+        });
+        while (chatLog.children.length > 14) chatLog.removeChild(chatLog.firstChild);
+        applyChatFilter();
+      }
+      window.addEventListener('hmp-hud:chat', function (e) {
+        renderChat(e.detail && e.detail.messages);
+      });
+      window.addEventListener('hmp-hud:chat-open', function () {
+        document.body.classList.add('chat-open');
+        setTimeout(function () { try { chatInputEl.focus(); } catch (e) { } }, 30);
+      });
+      window.addEventListener('hmp-hud:chat-close', function () {
+        document.body.classList.remove('chat-open');
+        try { chatInputEl.blur(); } catch (e) { }
+      });
+      var chatTabRow = el('chatTabs');
+      if (chatTabRow) {
+        Array.prototype.forEach.call(chatTabRow.children, function (btn) {
+          btn.addEventListener('click', function () {
+            chatFilter = btn.dataset.filter || 'all';
+            Array.prototype.forEach.call(chatTabRow.children, function (b) {
+              b.classList.toggle('on', b === btn);
+            });
+            applyChatFilter();
+          });
+        });
+      }
+      chatInputEl.addEventListener('keydown', function (ev) {
+        ev.stopPropagation();
+        if (ev.key === 'Tab') { ev.preventDefault(); return; }
+        if (ev.key === 'Enter') {
+          var text = chatInputEl.value.trim().slice(0, 256);
+          chatInputEl.value = '';
+          callNative('hmp-hud:chat-send', JSON.stringify({ text: text }));
+          document.body.classList.remove('chat-open');
+          chatInputEl.blur();
+        } else if (ev.key === 'Escape') {
+          chatInputEl.value = '';
+          callNative('hmp-hud:chat-close', '{}');
+          document.body.classList.remove('chat-open');
+          chatInputEl.blur();
+        }
+      });
+
+      currentLayout = loadLocal() || currentLayout;
+      applyLayout();
+      if (typeof callEvent === 'function') callEvent('ready', '{}');
+    })();
+  </script>
+</body>
+</html>

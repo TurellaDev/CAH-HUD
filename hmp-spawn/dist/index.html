@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --gold: #d6b36f;
+        --paper: #efe4c8;
+        --muted: #a79d89;
+        --line: rgba(214, 179, 111, 0.25);
+        --panel: rgba(15, 17, 20, 0.95);
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      body {
+        display: grid;
+        place-items: center;
+        color: var(--paper);
+        font-family: Georgia, "Times New Roman", serif;
+        background:
+          radial-gradient(ellipse at 50% 16%, rgba(171, 129, 59, 0.17), transparent 42%),
+          linear-gradient(rgba(4, 6, 9, 0.88), rgba(4, 5, 7, 0.96));
+      }
+      body::after { content: ""; position: fixed; inset: 20px; border: 1px solid rgba(214, 179, 111, 0.14); pointer-events: none; }
+      main { width: min(950px, 88vw); max-height: 86vh; display: flex; flex-direction: column; }
+      header { margin-bottom: 30px; text-align: center; }
+      .eyebrow { color: var(--gold); font: 10px Arial, sans-serif; letter-spacing: 0.42em; text-transform: uppercase; }
+      h1 { margin: 10px 0 5px; font-size: clamp(29px, 4vw, 44px); font-weight: 500; letter-spacing: 0.04em; }
+      #character { margin: 0; color: var(--muted); font-size: 15px; font-style: italic; }
+      #locations { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: 15px; padding: 4px; overflow-y: auto; }
+      .location {
+        min-height: 180px;
+        padding: 23px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        text-align: left;
+        color: inherit;
+        background: linear-gradient(145deg, rgba(34, 34, 35, 0.98), var(--panel));
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        cursor: pointer;
+        box-shadow: 0 18px 45px rgba(0, 0, 0, 0.4);
+        transition: transform 150ms ease, border-color 150ms ease;
+      }
+      .location:hover, .location:focus-visible { transform: translateY(-4px); border-color: rgba(214, 179, 111, 0.7); outline: none; }
+      .location.last { background: linear-gradient(145deg, rgba(50, 40, 26, 0.98), var(--panel)); border-color: rgba(214, 179, 111, 0.44); }
+      .kind { color: var(--gold); font: 9px Arial, sans-serif; letter-spacing: 0.24em; text-transform: uppercase; }
+      .name { margin: 20px 0 7px; font-size: 23px; letter-spacing: 0.025em; }
+      .description { min-height: 38px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+      .choose { margin-top: 18px; color: #756d5e; font: 9px Arial, sans-serif; letter-spacing: 0.24em; text-transform: uppercase; }
+      #error { min-height: 20px; margin-top: 14px; color: #d0766c; text-align: center; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="eyebrow">Choose Your Destination</div>
+        <h1>Where Will Your Story Continue?</h1>
+        <p id="character"></p>
+      </header>
+      <section id="locations"></section>
+      <div id="error" role="status"></div>
+    </main>
+    <script>
+      const send = (event, payload) => callEvent(event, JSON.stringify(payload || {}));
+      const list = document.getElementById("locations");
+      const error = document.getElementById("error");
+      let model = { character: {}, locations: [] };
+
+      function render() {
+        document.getElementById("character").textContent = `Entering the world as ${model.character?.name || "your character"}`;
+        error.textContent = model.locations?.length ? "" : (model.emptyMessage || "No destinations are currently available. Please contact the server administrator.");
+        list.textContent = "";
+        for (const location of model.locations || []) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "location" + (location.kind === "last" ? " last" : "");
+          button.innerHTML = '<div><div class="kind"></div><div class="name"></div><div class="description"></div></div><div class="choose">Travel here</div>';
+          button.querySelector(".kind").textContent = location.kind === "last" ? "Continue" : "Spawn Location";
+          button.querySelector(".name").textContent = location.label;
+          button.querySelector(".description").textContent = location.description || (location.kind === "last" ? "Return to where this character last left the world." : "Begin here.");
+          button.addEventListener("click", () => send("select", { key: location.key }));
+          list.appendChild(button);
+        }
+      }
+
+      window.addEventListener("hmp-spawn:model", (event) => { model = event.detail || model; render(); });
+      window.addEventListener("hmp-spawn:error", (event) => { error.textContent = event.detail?.message || "That location is unavailable."; });
+      send("ready");
+    </script>
+  </body>
+</html>

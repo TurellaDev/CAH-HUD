@@ -1,0 +1,115 @@
+{
+  "updateIntervalMs": 1000,
+  "inventoryRefreshMs": 10000,
+  "money": {
+    "enabled": true,
+    "item": "native:galleons",
+    "label": "Galeões"
+  },
+  "inventory": {
+    "enabled": true,
+    "metric": "slots"
+  },
+  "health": {
+    "enabled": true,
+    "max": 100
+  },
+  "xp": {
+    "enabled": true
+  },
+  "keybinds": {
+    "inventoryToggle": true,
+    "inventoryKey": "tab"
+  },
+  "chat": {
+    "enabled": true,
+    "openKey": "enter"
+  },
+  "gameMenus": {
+    "enabled": true,
+    "mode": "pause",
+    "pages": ["spells"],
+    "toolWheel": false,
+    "actionScreen": false
+  },
+  "gameHud": {
+    "enabled": true,
+    "keepGroups": ["map"]
+  },
+  "menu": {
+    "enabled": true,
+    "command": "menu"
+  },
+  "year": {
+    "mode": "school",
+    "metadataKey": "hmp-hud:year",
+    "bands": [
+      { "maxLevel": 5, "year": 1 },
+      { "maxLevel": 10, "year": 2 },
+      { "maxLevel": 15, "year": 3 },
+      { "maxLevel": 20, "year": 4 },
+      { "maxLevel": 25, "year": 5 },
+      { "maxLevel": 30, "year": 6 },
+      { "maxLevel": 40, "year": 7 }
+    ],
+    "tests": {
+      "enabled": true,
+      "command": "teste",
+      "talentPrefix": "class-",
+      "requirements": [
+        { "targetYear": 2, "classes": { "charms": 1, "potions": 1, "defence": 1, "herbology": 1 } },
+        { "targetYear": 3, "classes": { "charms": 2, "potions": 2, "defence": 2, "herbology": 2 } },
+        { "targetYear": 4, "classes": { "charms": 3, "potions": 3, "defence": 3, "herbology": 3 } },
+        { "targetYear": 5, "classes": { "charms": 4, "potions": 4, "defence": 4, "herbology": 4 } },
+        { "targetYear": 6, "classes": { "charms": 5, "potions": 5, "defence": 5, "herbology": 5 } },
+        { "targetYear": 7, "classes": { "charms": 6, "potions": 6, "defence": 6, "herbology": 6 } }
+      ]
+    }
+  },
+  "classes": {
+    "enabled": true,
+    "showBlip": true,
+    "items": [
+      {
+        "key": "charms",
+        "subject": "Feitiços",
+        "teacher": "Professor Flitwick",
+        "location": "Sala de Feitiços",
+        "start": "09:00",
+        "end": "10:00"
+      },
+      {
+        "key": "potions",
+        "subject": "Poções",
+        "teacher": "Professor Sharp",
+        "location": "Sala de Poções",
+        "start": "11:00",
+        "end": "12:30"
+      },
+      {
+        "key": "defence",
+        "subject": "Defesa Contra as Artes das Trevas",
+        "teacher": "Professora Hecat",
+        "location": "Sala de Defesa",
+        "start": "14:00",
+        "end": "15:00"
+      },
+      {
+        "key": "herbology",
+        "subject": "Herbologia",
+        "teacher": "Professora Garlick",
+        "location": "Estufas",
+        "start": "16:00",
+        "end": "17:00",
+        "x": 366784,
+        "y": -461527,
+        "z": -82610,
+        "areaId": "Overland"
+      }
+    ]
+  },
+  "admins": {
+    "enabled": true,
+    "players": ["raúl magias", "_th0rium"]
+  }
+}
