@@ -28,6 +28,7 @@
   const progressionResource = optionalImport("hmp-progression");
   const worldResource = optionalImport("hmp-world");
   const blipsResource = optionalImport("hmp-blips");
+  const bankingResource = optionalImport("hmp-banking");
 
   if (!core) logger.warn("hmp-core is unavailable: sessions and character metadata are disabled");
   if (!inventoryResource) logger.warn("hmp-inventory is unavailable: money and inventory space are hidden");
@@ -177,7 +178,7 @@
     const defaults = {
       updateIntervalMs: 1000,
       inventoryRefreshMs: 10000,
-      money: { enabled: true, item: "native:galleons", label: "Galeões" },
+      money: { enabled: true, item: "native:galleons", label: "Galeões", currency: "galleons", source: "auto" },
       inventory: { enabled: true, metric: "slots" },
       health: { enabled: true, max: 100 },
       xp: { enabled: true },
@@ -229,9 +230,11 @@
       updateIntervalMs: clampNumber(loaded.updateIntervalMs, 250, 60000, 1000),
       inventoryRefreshMs: clampNumber(loaded.inventoryRefreshMs, 0, 3600000, 10000),
       money: {
-        enabled: money.enabled !== false && !!inventoryResource,
+        enabled: money.enabled !== false,
         item: String(money.item || "native:galleons"),
         label: String(money.label || "Galeões").slice(0, 24),
+        currency: String(money.currency || "galleons").trim().toLowerCase().slice(0, 32) || "galleons",
+        source: ["banking", "inventory", "auto"].includes(money.source) ? money.source : "auto",
       },
       inventory: {
         enabled: inventory.enabled !== false && !!inventoryResource,
@@ -667,22 +670,31 @@
     if (wants("classes")) {
       entry.cache.classes = computeClasses(entry);
     }
-    if (wants("money") && config.money.enabled && inventoryResource && inventoryResource.inventory) {
-      try {
-        // Allow override via environment variable or config
-        const itemOverride = process.env.HMP_HUD_MONEY_ITEM || config.money.item;
-        const amount = await inventoryResource.inventory.count(player, itemOverride);
-        if (Number.isFinite(amount)) {
-          entry.cache.money = { amount, label: config.money.label };
-          logger.debug(`[hmp-hud] Money: item=${itemOverride}, amount=${amount}`);
-        } else {
-          entry.cache.money = null;
-          logger.warn(`[hmp-hud] Money count non-finite for item '${itemOverride}': ${amount}`);
+    if (wants("money") && config.money.enabled) {
+      // Banking personal account first (the galleons live there), falling back to the
+      // native inventory count when banking is unavailable or the source says so.
+      let money = null;
+      if (config.money.source !== "inventory" && bankingResource && bankingResource.accounts &&
+          typeof bankingResource.accounts.personal === "function") {
+        try {
+          const account = await bankingResource.accounts.personal(player, config.money.currency);
+          const balance = account ? Number(account.balance) : NaN;
+          if (Number.isFinite(balance)) {
+            money = { amount: Math.round(balance * 100) / 100, label: config.money.label };
+          }
+        } catch (_) {
         }
-      } catch (_) {
-        entry.cache.money = null;
-        logger.warn(`[hmp-hud] Failed to get money count for item '${config.money.item}':`);
+        if (!money && config.money.source === "banking") money = null;
       }
+      if (!money && config.money.source !== "banking" && inventoryResource && inventoryResource.inventory) {
+        try {
+          const itemOverride = process.env.HMP_HUD_MONEY_ITEM || config.money.item;
+          const amount = await inventoryResource.inventory.count(player, itemOverride);
+          if (Number.isFinite(amount)) money = { amount, label: config.money.label };
+        } catch (_) {
+        }
+      }
+      entry.cache.money = money;
     }
     if (wants("inventory") && config.inventory.enabled && inventoryResource && inventoryResource.inventory) {
       try {
