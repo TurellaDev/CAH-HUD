@@ -29,12 +29,14 @@
   const worldResource = optionalImport("hmp-world");
   const blipsResource = optionalImport("hmp-blips");
   const bankingResource = optionalImport("hmp-banking");
+  const housesResource = optionalImport("hmp-houses");
 
   if (!core) logger.warn("hmp-core is unavailable: sessions and character metadata are disabled");
   if (!inventoryResource) logger.warn("hmp-inventory is unavailable: money and inventory space are hidden");
   if (!progressionResource) logger.warn("hmp-progression is unavailable: level, XP and derived school year are hidden");
   if (!worldResource) logger.warn("hmp-world is unavailable: clock, weather, calendar and the class timetable are hidden");
   if (!blipsResource) logger.warn("hmp-blips is unavailable: the class map blip is disabled");
+  if (!housesResource) logger.warn("hmp-houses is unavailable: the house crest widget shows the mystery crest");
 
   const messageOf = (error) => (error instanceof Error ? error.message : String(error));
 
@@ -178,7 +180,7 @@
     const defaults = {
       updateIntervalMs: 1000,
       inventoryRefreshMs: 10000,
-      money: { enabled: true, item: "native:galleons", label: "Galeões", currency: "galleons", source: "auto" },
+      money: { enabled: true, source: "auto", currency: "galleons", item: "native:galleons", label: "Galeões" },
       inventory: { enabled: true, metric: "slots" },
       health: { enabled: true, max: 100 },
       xp: { enabled: true },
@@ -226,15 +228,22 @@
     const keepGroups = Array.isArray(gameHud.keepGroups)
       ? gameHud.keepGroups.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean)
       : ["map"];
+    // `native` reads the in-game wallet, `bank` the hmp-banking account, and
+    // `auto` prefers the wallet: that is the ledger the economy actually moves
+    // (hmp-wardrobe, hmp-shops and hmp-business all charge native:galleons), so
+    // reading it is what keeps the number on screen in step with buying and
+    // selling.
+    const rawMoneySource = String(money.source || "auto").trim().toLowerCase();
+    const moneySource = ["native", "bank", "auto"].includes(rawMoneySource) ? rawMoneySource : "auto";
     return {
       updateIntervalMs: clampNumber(loaded.updateIntervalMs, 250, 60000, 1000),
       inventoryRefreshMs: clampNumber(loaded.inventoryRefreshMs, 0, 3600000, 10000),
       money: {
-        enabled: money.enabled !== false,
+        enabled: money.enabled !== false && !!(inventoryResource || bankingResource),
+        source: moneySource,
         item: String(money.item || "native:galleons"),
+        currency: String(money.currency || "galleons").slice(0, 32),
         label: String(money.label || "Galeões").slice(0, 24),
-        currency: String(money.currency || "galleons").trim().toLowerCase().slice(0, 32) || "galleons",
-        source: ["banking", "inventory", "auto"].includes(money.source) ? money.source : "auto",
       },
       inventory: {
         enabled: inventory.enabled !== false && !!inventoryResource,
@@ -631,7 +640,56 @@
     };
   }
 
+  // Money is the number the player can actually spend. Everything that charges
+  // the player - hmp-wardrobe, hmp-shops, hmp-business - moves native:galleons,
+  // so that is the ledger worth showing; the hmp-banking account is only a
+  // fallback for setups that run without hmp-inventory.
+  async function readMoney(player) {
+    const { source, item, currency } = config.money;
+    const wantsNative = source === "native" || (source === "auto" && !!inventoryResource);
+    if (wantsNative && inventoryResource && inventoryResource.inventory) {
+      try {
+        const amount = Number(await inventoryResource.inventory.count(player, item));
+        if (Number.isFinite(amount)) return Math.max(0, Math.trunc(amount));
+      } catch (error) {
+        logger.warn(`[hmp-hud] Failed to read ${item}: ${messageOf(error)}`);
+        if (source === "native") return null;
+      }
+    }
+    if (source === "native") return null;
+    if (bankingResource && bankingResource.accounts) {
+      try {
+        const account = await bankingResource.accounts.personal(player, currency);
+        const balance = account ? Number(account.balance) : NaN;
+        if (Number.isFinite(balance)) return Math.max(0, Math.trunc(balance));
+        logger.warn(`[hmp-hud] Bank balance non-finite: ${account && account.balance}`);
+      } catch (error) {
+        logger.warn(`[hmp-hud] Failed to read bank balance: ${messageOf(error)}`);
+      }
+    }
+    return null;
+  }
+
   // parts: character -> world -> xp -> year -> classes -> money -> inventory -> health -> layout
+  const HOUSE_TTL_MS = 10000;
+  async function readHouse(player, entry) {
+    if (!housesResource || !housesResource.membership || !housesResource.membership.get) return null;
+    const now = Date.now();
+    // Cheap TTL: the crest rarely changes, so skip the DB read unless it is
+    // stale or a hmp:houses:changed event forced a refresh (houseReadAt = 0).
+    if (entry.houseReadAt && now - entry.houseReadAt < HOUSE_TTL_MS) return entry.cache.house;
+    entry.houseReadAt = now;
+    try {
+      const character = entry.cache.character || (core && core.characters ? core.characters.active(player) : null);
+      if (!character || !character.id) return null;
+      const membership = await housesResource.membership.get(character.id);
+      const house = membership && membership.house ? String(membership.house).toLowerCase() : "";
+      return house ? { house: house } : null;
+    } catch (_) {
+      return entry.cache.house || null;
+    }
+  }
+
   async function applyParts(player, entry, parts) {
     const wants = (name) => parts.has(name);
     if (wants("character") || wants("year")) {
@@ -645,8 +703,10 @@
       entry.cache.world = null;
       if (worldResource && worldResource.environment) {
         try {
-          entry.cache.world = normalizeWorld(worldResource.environment.state());
-        } catch (_) {
+          const wstate = worldResource.environment.state();
+          entry.cache.world = normalizeWorld(wstate);
+        } catch (error) {
+          logger.warn(`[hmp-hud] environment.state() failed: ${messageOf(error)}`);
           entry.cache.world = null;
         }
       }
@@ -670,31 +730,12 @@
     if (wants("classes")) {
       entry.cache.classes = computeClasses(entry);
     }
+    if (wants("house")) {
+      entry.cache.house = await readHouse(player, entry);
+    }
     if (wants("money") && config.money.enabled) {
-      // Banking personal account first (the galleons live there), falling back to the
-      // native inventory count when banking is unavailable or the source says so.
-      let money = null;
-      if (config.money.source !== "inventory" && bankingResource && bankingResource.accounts &&
-          typeof bankingResource.accounts.personal === "function") {
-        try {
-          const account = await bankingResource.accounts.personal(player, config.money.currency);
-          const balance = account ? Number(account.balance) : NaN;
-          if (Number.isFinite(balance)) {
-            money = { amount: Math.round(balance * 100) / 100, label: config.money.label };
-          }
-        } catch (_) {
-        }
-        if (!money && config.money.source === "banking") money = null;
-      }
-      if (!money && config.money.source !== "banking" && inventoryResource && inventoryResource.inventory) {
-        try {
-          const itemOverride = process.env.HMP_HUD_MONEY_ITEM || config.money.item;
-          const amount = await inventoryResource.inventory.count(player, itemOverride);
-          if (Number.isFinite(amount)) money = { amount, label: config.money.label };
-        } catch (_) {
-        }
-      }
-      entry.cache.money = money;
+      const balance = await readMoney(player);
+      entry.cache.money = balance === null ? null : { amount: balance, label: config.money.label };
     }
     if (wants("inventory") && config.inventory.enabled && inventoryResource && inventoryResource.inventory) {
       try {
@@ -759,6 +800,7 @@
       test: cache.test || null,
       world: cache.world || null,
       classes: cache.classes || null,
+      house: cache.house || null,
     };
   }
 
@@ -838,7 +880,7 @@
     await runRefresh(
       player,
       entry,
-      new Set(["character", "world", "xp", "year", "test", "classes", "money", "inventory", "health", "layout"]),
+      new Set(["character", "world", "xp", "year", "test", "classes", "house", "money", "inventory", "health", "layout"]),
       { show: true, force: true },
     );
     logger.debug(`HUD shown for #${player.id}`);
@@ -854,25 +896,12 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Periodic tick: cheap live values (health, money) + clock/weather/timetable
+  // Periodic refresh is CLIENT-DRIVEN: the client sends "hmp-hud:tick" every
+  // ~1s while the HUD is visible (see the Events.onClient handler below).
+  // Server-side timers are unreliable in this host (they fire at most once), so
+  // we deliberately don't rely on setInterval/setTimeout for periodic work.
   // ---------------------------------------------------------------------------
   let lastInventorySweep = 0;
-  const tickTimer = setInterval(() => {
-    const sweep = config.inventoryRefreshMs > 0 && Date.now() - lastInventorySweep >= config.inventoryRefreshMs;
-    if (sweep) lastInventorySweep = Date.now();
-    for (const [id, entry] of [...tracked]) {
-      const session = core && core.sessions ? core.sessions.get(id) : null;
-      if (!session || !session.player) {
-        tracked.delete(id);
-        continue;
-      }
-      const parts = new Set(["health", "money", "world", "classes"]);
-      for (const part of entry.dirtyParts.splice(0)) parts.add(part);
-      if (sweep) parts.add("inventory");
-      void runRefresh(session.player, entry, parts, {});
-    }
-  }, config.updateIntervalMs);
-  if (typeof tickTimer.unref === "function") tickTimer.unref();
 
   // ---------------------------------------------------------------------------
   // Lifecycle events
@@ -1230,6 +1259,37 @@
     }
   });
 
+  // Client-driven periodic refresh. Server-side timers are unreliable in this
+  // host (they fire at most once), so the client pokes us every ~1s while the
+  // HUD is visible. runRefresh only pushes when the state actually changed.
+  Events.onClient("hmp-hud:tick", (player) => {
+    const entry = entryFor(player && player.id);
+    if (!entry) return;
+    const parts = new Set(["health", "money", "world", "classes", "house"]);
+    if (config.inventoryRefreshMs > 0 && Date.now() - lastInventorySweep >= config.inventoryRefreshMs) {
+      lastInventorySweep = Date.now();
+      parts.add("inventory");
+    }
+    void runRefresh(player, entry, parts, {});
+  });
+
+  // House changes (admin assignment, /casa) refresh the crest immediately.
+  Events.on("hmp:houses:changed", (payload) => {
+    const player = payload && payload.player;
+    if (!player) return;
+    const entry = entryFor(player && player.id);
+    if (entry) entry.houseReadAt = 0;
+    markDirty(player, ["house"]);
+  });
+
+  // ESC card "Horário": ask hmp-schedule to open its guide for this player.
+  Events.onClient("hmp-hud:esc-schedule", (player) => {
+    try {
+      Events.emit("hmp-schedule:open-request", { player: player });
+    } catch (_) {
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // /menu layout saves (hmp-hud:layout-save relayed by the client from the page)
   // ---------------------------------------------------------------------------
@@ -1275,7 +1335,6 @@
 
   Events.on("resourceStop", (name) => {
     if (name && name !== "cah-hud") return;
-    clearInterval(tickTimer);
     tracked.clear();
     clearClassBlip();
     try {

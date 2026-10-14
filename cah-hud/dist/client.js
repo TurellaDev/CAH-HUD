@@ -89,6 +89,27 @@
         closeChatInput(true);
       });
       Web.on(view, "hmp-hud:chat-close", () => closeChatInput(false));
+      // Page -> client: ESC menu card interactions.
+      Web.on(view, "hmp-hud:esc-close", () => {
+        // Ignore the echo of the opening keypress (see the page-side guard).
+        if (escOpenedAt && Date.now() - escOpenedAt < 250) return;
+        closeEscMenu();
+      });
+      Web.on(view, "hmp-hud:esc-editor", () => {
+        closeEscMenu();
+        openMenu({});
+      });
+      Web.on(view, "hmp-hud:esc-settings", () => {
+        closeEscMenu();
+        openNativeSettings();
+      });
+      Web.on(view, "hmp-hud:esc-schedule", () => {
+        closeEscMenu();
+        try {
+          Events.emitServer("hmp-hud:esc-schedule", "{}");
+        } catch (_) {
+        }
+      });
     }
     return view;
   }
@@ -98,6 +119,7 @@
   // ---------------------------------------------------------------------------
   const gameHud = { enabled: false, keepGroups: ["map"] };
   const heldGroups = new Set();
+  let loggedGroupNames = false;
 
   function groupKept(name) {
     const lower = String(name || "").toLowerCase();
@@ -132,6 +154,10 @@
       }
     }
     if (heldGroups.size) {
+      if (!loggedGroupNames) {
+        loggedGroupNames = true;
+        logger.info(`Native HUD group names: hidden=[${[...heldGroups].join(", ")}] kept=[${gameHud.keepGroups.join(", ")}]`);
+      }
       logger.info(
         `Native HUD suppressed: ${heldGroups.size} group(s) hidden, kept: ${gameHud.keepGroups.join(", ") || "none"}`,
       );
@@ -210,6 +236,148 @@
   }
 
   Events.on("hmp-hud:menu", openMenu);
+
+  // ---------------------------------------------------------------------------
+  // ESC menu card: the game's own ESC field guide stays disabled, so ESC opens
+  // our own card menu instead (Definições / Horário / Editor do HUD). The card
+  // owns the physical ESC edge with priority 600 - above hmp-schedule's guide
+  // (500) - and closes itself on ESC while the focused view handles the key.
+  // ---------------------------------------------------------------------------
+  let escLease = null;
+  let escMenuOpen = false;
+  let escOpenedAt = 0;
+  let escClosedAt = 0;
+
+  function openEscMenu() {
+    if (escMenuOpen || menuActive) {
+      logger.info(`ESC card open refused: card=${escMenuOpen} editor=${menuActive}`);
+      return;
+    }
+    // Ignore the echo of the keypress that closed the card: the game layer can
+    // re-deliver that edge after the view released focus.
+    if (escClosedAt && Date.now() - escClosedAt < 200) {
+      logger.info("ESC card open ignored (echo of the closing press)");
+      return;
+    }
+    if (ensureView() < 0) {
+      logger.warn("ESC card open refused: the HUD web view is unavailable");
+      return;
+    }
+    escMenuOpen = true;
+    escOpenedAt = Date.now();
+    visible = true;
+    Web.showView(view);
+    try {
+      Web.focusView(view);
+    } catch (_) {
+      try {
+        Web.focusView(view, true);
+      } catch (__) {
+        logger.warn("ESC card: focusView failed (ESC may not close the card)");
+      }
+    }
+    if (!escLease && Hmp && Hmp.input && Hmp.input.controls) {
+      try {
+        escLease = Hmp.input.controls.acquire({ resource: "cah-hud", id: "esc-menu" });
+      } catch (_) {
+        escLease = null;
+      }
+    }
+    try {
+      Web.emit(view, "hmp-hud:escmenu", { open: true });
+    } catch (_) {
+    }
+  }
+
+  function closeEscMenu() {
+    if (!escMenuOpen) return;
+    escMenuOpen = false;
+    escClosedAt = Date.now();
+    logger.info("ESC card closed");
+    try {
+      Web.focusView(view, false);
+    } catch (_) {
+    }
+    try {
+      Web.emit(view, "hmp-hud:escmenu", { open: false });
+    } catch (_) {
+    }
+    if (escLease) {
+      try {
+        escLease.release();
+      } catch (_) {
+      }
+      escLease = null;
+    }
+  }
+
+  // The game hides its natives for driving the Field Guide behind DEV/QA names,
+  // but they are real and exposed to resources: _menuPageHotkey(page) fires the
+  // page's hotkey handler "as the key would" and _fieldGuideClose() closes the
+  // guide through its own back path. Definições therefore: gives back the Field
+  // Guide hold (clears the pause-lock that blocks opening), opens the guide
+  // straight at the settings page, and keeps guideOpenState true until the
+  // player presses ESC again - our shortcut then closes the settings and
+  // re-takes the hold, so ESC returns to this card.
+  let guideOpenState = false;
+  let guideWatch = null;
+
+  function openNativeSettings() {
+    if (typeof Game === "undefined" || !Game) return;
+    try {
+      if (typeof Game.setPauseMenuEnabled === "function") Game.setPauseMenuEnabled(true);
+      if (typeof Game.setMenuPageEnabled === "function") {
+        for (const page of MENU_PAGES) {
+          try {
+            Game.setMenuPageEnabled(page, page === "settings");
+          } catch (_) {
+          }
+        }
+      }
+      try {
+        if (typeof Game._menuPageHotkey === "function") Game._menuPageHotkey("settings");
+        else if (typeof Game._fieldGuideOpen === "function") Game._fieldGuideOpen();
+      } catch (_) {
+      }
+      guideOpenState = true;
+      logger.info("Opening the native settings page from the ESC menu");
+    } catch (_) {
+    }
+    // One delayed pass: if the hotkey only landed on the guide's index page,
+    // click the settings entry "as a click would".
+    if (guideWatch) clearTimeout(guideWatch);
+    guideWatch = setTimeout(() => {
+      guideWatch = null;
+      if (!guideOpenState) return;
+      try {
+        if (typeof Game !== "undefined" && Game && typeof Game._menuPagesState === "function") {
+          const state = Game._menuPagesState();
+          if (state && state.open && state.tabIndex === 0 && state.activeMenu !== "settings" && typeof Game._menuPageIndexSelect === "function") {
+            Game._menuPageIndexSelect("settings");
+            logger.info("Clicked the settings entry on the Field Guide index");
+          }
+          logger.info(`Field guide state: ${JSON.stringify(state)}`);
+        } else {
+          logger.info("Field guide QA state native unavailable; ESC still closes the settings");
+        }
+      } catch (error) {
+        logger.warn(`Field guide state read failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, 600);
+  }
+
+  function closeNativeSettings() {
+    guideOpenState = false;
+    if (guideWatch) { clearTimeout(guideWatch); guideWatch = null; }
+    try {
+      if (typeof Game !== "undefined" && Game) {
+        if (typeof Game._fieldGuideClose === "function") Game._fieldGuideClose();
+        if (typeof Game.setPauseMenuEnabled === "function") Game.setPauseMenuEnabled(false);
+      }
+    } catch (_) {
+    }
+    logger.info("Native settings closed; ESC returns to the HUD menu card");
+  }
 
   // Server acknowledges a saved layout so the page can toast the player.
   Events.on("hmp-hud:layout-saved", (payload) => {
@@ -824,6 +992,13 @@
     visible = true;
     Web.showView(view);
     suppressGameHud(true);
+    // Entering the world: only NOW are the native menu holds + ESC bind applied,
+    // so the loading/character/spawn phases run completely untouched.
+    if (!inWorld) {
+      inWorld = true;
+      applyGameMenus(menusConfig);
+      registerMenuShortcut();
+    }
     pushToPage();
     pushChatToPage();
   });
@@ -962,11 +1137,54 @@
     }
   });
 
-  // Live poll: keeps the XP bar and (fallback) health smooth between server pushes.
+  // Live poll: re-render locally + ask the server for fresh state every ~1s.
+  // Server-side timers are unreliable in this host, so the client drives the
+  // periodic refresh (clock/money/health) itself.
+  let lastTickRequest = 0;
   const pollTimer = setInterval(() => {
-    if (visible && serverState) pushToPage();
+    if (!visible) return;
+    if (serverState) pushToPage();
+    if (Date.now() - lastTickRequest >= 1000) {
+      lastTickRequest = Date.now();
+      try {
+        Events.emitServer("hmp-hud:tick", "{}");
+      } catch (_) {
+      }
+    }
   }, POLL_MS);
   if (typeof pollTimer.unref === "function") pollTimer.unref();
+
+  // ESC opens the HUD menu card (Definições / Horário / Editor do HUD).
+  function registerEscShortcut() {
+    if (!Hmp || !Hmp.input || !Hmp.input.shortcuts) {
+      logger.warn("hmp-lib input shortcuts unavailable: the ESC menu card is disabled");
+      return;
+    }
+    try {
+      Hmp.input.shortcuts.register({
+        resource: "cah-hud",
+        id: "toggle-esc-menu",
+        key: "escape",
+        state: "down",
+        priority: 600,
+        when: () => visible && !escMenuOpen && !menuActive,
+        handler: () => {
+          logger.info(`ESC edge: guide=${guideOpenState} vis=${visible} menu=${menuActive} card=${escMenuOpen}`);
+          if (guideOpenState) {
+            // The native settings page is up: this ESC closes it and hands the
+            // key back to the card, instead of stacking the card on top.
+            closeNativeSettings();
+            return;
+          }
+          openEscMenu();
+        },
+      });
+      logger.info("ESC menu card bound (priority 600)");
+    } catch (error) {
+      logger.warn(`Could not bind the ESC menu card: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  registerEscShortcut();
 
   ensureView();
   announceReady();

@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "cah-hud",
   "version": "0.8.1",
   "author": "CraftandHelps",
@@ -6,17 +6,18 @@
   "mafiahub": {
     "serverScripts": ["dist/server.js"],
     "clientScripts": ["dist/client.js"],
-    "files": ["dist/client.js", "dist/hud.html", "dist/inventory.html"],
+    "files": ["dist/client.js", "dist/hud.html", "dist/inventory.html", "dist/crests/**"],
     "exports": ["show", "hide", "refresh", "setYearOverride", "menu", "test", "status"],
     "resourceDependencies": [
       { "name": "hmp-lib", "version": "0.8.1" },
       { "name": "hmp-core", "version": "0.8.1" },
       { "name": "hmp-spawn", "version": "0.8.1" },
       { "name": "hmp-inventory", "version": "0.8.1" },
-      { "name": "hmp-banking", "version": "0.8.1" },
       { "name": "hmp-progression", "version": "0.8.1" },
       { "name": "hmp-world", "version": "0.8.1" },
-      { "name": "hmp-blips", "version": "0.8.1" }
+      { "name": "hmp-blips", "version": "0.8.1" },
+      { "name": "hmp-banking", "version": "0.8.1" },
+      { "name": "hmp-houses", "version": "0.8.1" }
     ],
     "errorBehavior": "stop",
     "priority": -350
