@@ -107,6 +107,7 @@ export type HmpHudWidgetKey =
     | "progress"
     | "classes"
     | "spells"
+    | "house"
     | "chat";
 
 /** Widget anchor as a percentage of the screen (top-left corner). */
@@ -167,6 +168,13 @@ export interface HmpHudTestResult {
     test?: HmpHudTestState;
 }
 
+export type HmpHudHouseId = "gryffindor" | "hufflepuff" | "ravenclaw" | "slytherin";
+
+/** House crest state: null while the character is unsorted (the page shows the mystery orb). */
+export interface HmpHudHouseState {
+    house: HmpHudHouseId;
+}
+
 export interface HmpHudState {
     active: boolean;
     character: { id: number; name: string } | null;
@@ -210,6 +218,8 @@ export interface HmpHudState {
         timeScale: number;
     } | null;
     classes: { current: HmpHudClassInfo | null; next: HmpHudClassInfo | null } | null;
+    /** The character's house (hmp-houses membership); null while unsorted. */
+    house: HmpHudHouseState | null;
 }
 
 export interface HmpHudStatus {

@@ -757,20 +757,24 @@
       // House crest: the player's house (hmp-houses) with its crest, or a
       // glowing mystery "?" orbited by magic dust while they are unsorted.
       // -----------------------------------------------------------------
-      var HOUSES_PT = { gryffindor: "Grifin\u00f3ria", hufflepuff: "Lufa-Lufa", ravenclaw: "Corvinal", slytherin: "Sonserina" };
+      var HOUSE_NAMES = { gryffindor: "Gryffindor", hufflepuff: "Hufflepuff", ravenclaw: "Ravenclaw", slytherin: "Slytherin" };
       var HOUSE_ACCENT = { gryffindor: "#e0b34d", hufflepuff: "#e8c85a", ravenclaw: "#7fc4d8", slytherin: "#9fd8a0" };
       function crestUrl(key) { return 'fw://resources/cah-hud/dist/crests/' + key + '.png'; }
       function renderHouse(data) {
         var widget = el('w-house');
-        var key = data && data.house ? String(data.house.house || '').toLowerCase() : '';
-        var known = HOUSES_PT[key];
+        // The server pushes state.house = { house: "gryffindor" }; a bare string is
+        // accepted too, so "Gryffindor"/pt-PT spellings still resolve.
+        var value = data && typeof data === 'object' ? (data.house || data.key || data.id || data.name) : data;
+        var key = String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+        var known = HOUSE_NAMES[key];
         var crest = el('houseCrest');
         var mystery = el('houseMystery');
         var name = el('houseName');
+        // #houseCrest / #houseMystery only display with the "on" class (see the CSS).
         if (known) {
           setOff(widget, false);
-          setOff(crest, false);
-          setOff(mystery, true);
+          crest.classList.add('on');
+          mystery.classList.remove('on');
           if (!crest.dataset.house || crest.dataset.house !== key) {
             crest.dataset.house = key;
             crest.src = crestUrl(key);
@@ -779,8 +783,8 @@
           widget.style.setProperty('--house-color', HOUSE_ACCENT[key] || '#c9a25a');
         } else {
           setOff(widget, false);
-          setOff(crest, true);
-          setOff(mystery, false);
+          crest.classList.remove('on');
+          mystery.classList.add('on');
           crest.dataset.house = '';
           name.textContent = 'Sem Casa';
           widget.style.setProperty('--house-color', '#c9a25a');

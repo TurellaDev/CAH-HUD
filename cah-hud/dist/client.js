@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 // hmp-hud - client bridge.
 //
 // Owns the HUD web view (created hidden at startup, like hmp-spawn does). The server pushes full
@@ -239,7 +239,7 @@
 
   // ---------------------------------------------------------------------------
   // ESC menu card: the game's own ESC field guide stays disabled, so ESC opens
-  // our own card menu instead (Definições / Horário / Editor do HUD). The card
+  // our own card menu instead (DefiniÃ§Ãµes / HorÃ¡rio / Editor do HUD). The card
   // owns the physical ESC edge with priority 600 - above hmp-schedule's guide
   // (500) - and closes itself on ESC while the focused view handles the key.
   // ---------------------------------------------------------------------------
@@ -314,7 +314,7 @@
   // The game hides its natives for driving the Field Guide behind DEV/QA names,
   // but they are real and exposed to resources: _menuPageHotkey(page) fires the
   // page's hotkey handler "as the key would" and _fieldGuideClose() closes the
-  // guide through its own back path. Definições therefore: gives back the Field
+  // guide through its own back path. DefiniÃ§Ãµes therefore: gives back the Field
   // Guide hold (clears the pause-lock that blocks opening), opens the guide
   // straight at the settings page, and keeps guideOpenState true until the
   // player presses ESC again - our shortcut then closes the settings and
@@ -985,6 +985,9 @@
     if (!state) return;
     serverState = state;
     lastPageJson = "";
+    // While another screen owns the display (Floo map), only buffer the state;
+    // resume renders it the moment the overlay hands the screen back.
+    if (suspended) return;
     if (ensureView() < 0) {
       logger.warn("The HUD web view is not available yet");
       return;
@@ -1004,6 +1007,15 @@
   });
 
   Events.on("hmp-hud:update", (payload) => {
+    if (suspended) {
+      // Keep the snapshot fresh so resume is instant; render waits for resume.
+      const buffered = objectOf(payload);
+      if (buffered) {
+        serverState = buffered;
+        lastPageJson = "";
+      }
+      return;
+    }
     if (!visible) return;
     if (view < 0) ensureView();
     const state = objectOf(payload);
@@ -1025,6 +1037,49 @@
       }
     }
     suppressGameHud(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Suspend/resume: a focused full-screen resource (the Floo Flames map) asks
+  // the HUD to step aside without dropping its state, and to come back after.
+  // Unlike hmp-hud:hide, the server snapshot survives, so resume is instant and
+  // the native game HUD suppression is untouched (no flicker behind overlays).
+  // A show/update arriving while suspended only buffers state until resume.
+  // ---------------------------------------------------------------------------
+  let suspended = false;
+  let suspendedWasVisible = false;
+
+  Events.on("hmp-hud:suspend", () => {
+    if (suspended) return;
+    suspended = true;
+    suspendedWasVisible = visible;
+    if (visible) {
+      visible = false;
+      if (view >= 0) {
+        try {
+          Web.hideView(view);
+        } catch (_) {
+        }
+      }
+    }
+  });
+
+  Events.on("hmp-hud:resume", () => {
+    if (!suspended) return;
+    suspended = false;
+    if (suspendedWasVisible && serverState) {
+      visible = true;
+      if (view >= 0) {
+        try {
+          Web.showView(view);
+        } catch (_) {
+        }
+      }
+      lastPageJson = "";
+      pushToPage();
+      pushChatToPage();
+    }
+    suspendedWasVisible = false;
   });
 
   // ---------------------------------------------------------------------------
@@ -1071,6 +1126,7 @@
       logger.warn(`Could not bind the inventory toggle to '${normalized}': ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
 
   Events.on("hmp-hud:keybinds", (payload) => {
     const value = objectOf(payload);
@@ -1154,7 +1210,7 @@
   }, POLL_MS);
   if (typeof pollTimer.unref === "function") pollTimer.unref();
 
-  // ESC opens the HUD menu card (Definições / Horário / Editor do HUD).
+  // ESC opens the HUD menu card (DefiniÃ§Ãµes / HorÃ¡rio / Editor do HUD).
   function registerEscShortcut() {
     if (!Hmp || !Hmp.input || !Hmp.input.shortcuts) {
       logger.warn("hmp-lib input shortcuts unavailable: the ESC menu card is disabled");
