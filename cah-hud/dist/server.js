@@ -1,4 +1,232 @@
 "use strict";
+// ============================================================================
+// Offline harness - runs only when this file is executed directly with node:
+//     node resources/cah-hud/dist/server.js
+// The resource loader never takes this branch (require.main !== module), and
+// harness mode skips the resource body below so the suite can load fresh,
+// mocked copies of this file instead.
+// ============================================================================
+const __offline = typeof require !== "undefined" && typeof module !== "undefined" && require.main === module;
+if (__offline) {
+/**
+ * Offline harness for the cah-hud money source.
+ *
+ * The HUD used to read the hmp-banking account balance while every shop - the
+ * wardrobe, Pippins, Spintwitches - charged native:galleons, so selling a cloak
+ * moved money the player never saw move. This extracts the shipped readMoney()
+ * out of dist/server.js and drives it, so it asserts the real logic rather than
+ * a copy of it that could drift.
+ */
+
+const fs = require("fs");
+const path = require("path");
+
+const SERVER_JS = __filename;
+const HUD_CONFIG = path.join(__dirname, "..", "..", "..", "data", "hmp-hud.json");
+
+let failures = 0;
+const check = (label, ok, extra = "") => {
+  console.log(`  ${ok ? "ok  " : "FAIL"} ${label}${!ok && extra ? ` -- ${extra}` : ""}`);
+  if (!ok) failures++;
+};
+
+/** Pull `async function readMoney(...)` out of the bundle, braces balanced. */
+function extractReadMoney(source) {
+  const start = source.indexOf("async function readMoney(");
+  if (start < 0) throw new Error("readMoney() is missing from dist/server.js");
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error("readMoney() has unbalanced braces");
+}
+
+function buildReadMoney(source, config, { inventory, banking }) {
+  const logger = { warn() {}, info() {}, error() {} };
+  const messageOf = (error) => (error instanceof Error ? error.message : String(error));
+  const factory = new Function(
+    "config",
+    "inventoryResource",
+    "bankingResource",
+    "logger",
+    "messageOf",
+    `${extractReadMoney(source)}\nreturn readMoney;`,
+  );
+  return factory(
+    { money: config },
+    inventory
+      ? { inventory: { count: async (player, item) => inventory(player, item) } }
+      : null,
+    banking
+      ? { accounts: { personal: async (player, currency) => banking(player, currency) } }
+      : null,
+    logger,
+    messageOf,
+  );
+}
+
+/** The economy charges native:galleons, so that is the number that must show. */
+const __fullSource = fs.readFileSync(SERVER_JS, "utf8");
+  const __cut = __fullSource.indexOf("// ======== resource body (the host loads this;" + " harness mode skips it) ========");
+  const source = __cut < 0 ? __fullSource : __fullSource.slice(__cut);
+const player = { id: 6 };
+
+async function main() {
+console.log("cah-hud money source\n");
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check(
+    "auto reads the in-game wallet the shops actually charge",
+    amount === 250,
+    `expected 250, got ${amount}`,
+  );
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("native pins the wallet", amount === 250, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "bank", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: async (p, currency) => {
+      if (currency !== "galleons") throw new Error(`unexpected currency '${currency}'`);
+      return { balance: 9000 };
+    },
+  });
+  const amount = await readMoney(player);
+  check("bank still reads the hmp-banking account", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 0,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("an empty wallet reads as 0, not as a fallback", amount === 0, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 12.9,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("fractional counts are truncated", amount === 12, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => -5,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("a negative count is clamped to 0", amount === 0, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => {
+      throw new Error("native inventory unavailable");
+    },
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("native hides money when its source is broken", amount === null, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => {
+      throw new Error("hmp-inventory is restarting");
+    },
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("auto degrades to the bank when the wallet is unavailable", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: null,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("auto uses the bank when hmp-inventory is absent", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "bank", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: Number.NaN }),
+  });
+  const amount = await readMoney(player);
+  check("a non-finite bank balance hides money instead of showing NaN", amount === null, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "nonsense", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("an unrecognised source degrades to the bank rather than blanking", amount === 9000, `got ${amount}`);
+  check(
+    "the config layer whitelists money.source, so readMoney only ever sees known values",
+    source.includes('"native", "bank", "auto"'),
+  );
+}
+
+// --- the shipped config has to agree with the code above
+{
+  const shipped = JSON.parse(fs.readFileSync(HUD_CONFIG, "utf8"));
+  check(
+    "data/hmp-hud.json money.source is a value readMoney understands",
+    ["native", "bank", "auto"].includes(String(shipped.money && shipped.money.source)),
+    String(shipped.money && shipped.money.source),
+  );
+  check(
+    "data/hmp-hud.json points at the item the shops charge",
+    String((shipped.money && shipped.money.item) || "") === "native:galleons",
+    String(shipped.money && shipped.money.item),
+  );
+  check(
+    "the HUD still refreshes money when the wallet changes",
+    source.includes('markDirty(payload && payload.player, ["inventory", "money"])'),
+  );
+  check("money no longer requires hmp-banking to be installed", !source.includes("config.money.enabled && !!bankingResource"));
+}
+
+console.log("");
+if (failures === 0) {
+  console.log("All hud money checks passed.");
+} else {
+  console.log(`${failures} hud money check(s) FAILED.`);
+}
+process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((error) => {
+  console.error(`hud money harness crashed: ${error && error.stack ? error.stack : error}`);
+  process.exit(1);
+});
+}
+
+// ======== resource body (the host loads this; harness mode skips it) ========
+if (!__offline) {
 // hmp-hud - server coordinator.
 //
 // The HUD is inactive until hmp-spawn reports a completed spawn (`hmp:spawn:complete`), which fires
@@ -1618,4 +1846,4 @@
       `native HUD ${config.gameHud.enabled ? `suppressed (keeps: ${config.gameHud.keepGroups.join(", ")})` : "untouched"}`,
   );
 })();
-
+}

@@ -1,17 +1,28 @@
 <!doctype html>
 <!--
-  cah-hud inventory page - a fork of hmp-inventory's bundled Arcanum renderer,
-  redesigned: translucent panels (the world stays visible behind the screen),
-  one flat list with no category tabs, and three actions per item:
-  Equip/Unequip (native gear, mounts and potions), Use (usable items) and
-  Drop (drops the stack on the ground as a physics prop others can pick up).
+  cah-hud inventory page — the "trunk" design: a slot grid like a classic RPG
+  inventory, with a bottom action bar. Fantasy skin from the pack's Arcanum
+  system (Cinzel + Spectral, heraldic gold on deep umber).
 
-  It implements the same versioned "hmp.inventory.ui/v1" bridge as the original:
-    callEvent("ready") after listeners are attached;
-    listens for "configure", "model", "actionError";
-    calls callEvent("close"|"refresh"|"use"|"equip"|"drop", JSON.stringify(...)).
-  Point hmp-inventory's ui.url at fw://resources/cah-hud/dist/inventory.html to use it.
-  Fonts and the fallback icon load from the hmp-inventory resource so nothing is duplicated.
+  Layout:
+    header (title + slot/weight counters)   ← drag handle
+    search row
+    slot grid — filled slots show icon, quantity and the gold diamond when
+                equipped; remaining trunk capacity shows as faint empty slots
+    action bar — selected item's icon, name, facts, description + the
+                 EQUIP / USE / GIVE / DROP buttons
+    footer (hints + REFRESH/CLOSE) + corner resize grip
+
+  Window behaviour: drag by the header, resize from the bottom-right grip,
+  geometry clamped to the viewport and remembered in localStorage; stacks to a
+  compact mode below 640px. Drag/resize update via transform + rAF only; grid
+  uses one delegated listener; icons decode lazily.
+
+  Bridge: the same versioned "hmp.inventory.ui/v1" contract as the stock page:
+    callEvent("ready"); listens for "configure" / "model" / "actionError";
+    callEvent("close" | "refresh" | "use" | "equip" | "give" | "drop", JSON.stringify(...)).
+  If an action gets no answer from the server, the page says so — that means
+  the hmp-inventory resource on the SERVER is out of date.
 -->
 <html lang="en">
 <head>
@@ -21,108 +32,401 @@
     @font-face { font-family:"Cinzel"; src:url("fw://resources/hmp-inventory/dist/fonts/Cinzel-Variable.ttf") format("truetype"); font-style:normal; font-weight:400 900; font-display:swap; }
     @font-face { font-family:"Spectral"; src:url("fw://resources/hmp-inventory/dist/fonts/Spectral-Regular.ttf") format("truetype"); font-style:normal; font-weight:400; font-display:swap; }
     :root {
-      color-scheme:dark;
+      color-scheme: dark;
       --gold:#d8b56b;
       --gold-deep:#c19a4e;
-      --line:rgba(201,162,90,.25);
-      --line-soft:rgba(201,162,90,.12);
+      --gold-bright:#ecdcb7;
+      --line:rgba(201,162,90,.30);
+      --line-soft:rgba(201,162,90,.13);
+      --panel:rgba(23,17,9,.88);
+      --panel-2:rgba(28,21,12,.82);
       --paper:#e7d8b4;
       --text:#c2b291;
-      --muted:#a89873;
+      --muted:#8a7b5f;
     }
     * { box-sizing:border-box; }
     html,body { margin:0; width:100%; height:100%; overflow:hidden; font-family:"Spectral",Georgia,serif; background:transparent; color:var(--paper); }
-    body { display:grid; place-items:center; background:rgba(4,3,1,.35); }
-    .shell { width:min(1060px,90vw); height:min(680px,82vh); background:rgba(12,9,5,.55); border:1px solid var(--line); border-radius:6px; box-shadow:0 24px 70px rgba(0,0,0,.5); position:relative; overflow:hidden; display:flex; flex-direction:column; }
-    header { display:flex; align-items:center; justify-content:space-between; padding:20px 28px 14px; border-bottom:1px solid var(--line-soft); background:rgba(10,7,3,.35); }
-    .eyebrow { color:var(--muted); font-family:"Cinzel",Georgia,serif; font-size:10px; font-weight:600; line-height:1.2; letter-spacing:.22em; text-transform:uppercase; margin-bottom:6px; }
-    .eyebrow:before { content:""; display:inline-block; width:7px; height:7px; margin-right:10px; background:var(--gold); transform:rotate(45deg); vertical-align:1px; }
-    h1 { margin:0; font-family:"Cinzel",Georgia,serif; font-weight:600; font-size:24px; letter-spacing:.07em; color:var(--paper); }
-    .stats { display:flex; gap:10px; align-items:center; font:11px ui-monospace,Consolas,monospace; color:var(--text); }
-    .pill { border:1px solid var(--line-soft); border-radius:4px; padding:7px 10px; min-width:92px; text-align:center; background:rgba(0,0,0,.25); }
-    .keyhint { border:1px dashed rgba(201,162,90,.35); border-radius:4px; padding:7px 10px; text-align:center; color:var(--muted); }
-    button { color:var(--text); background:rgba(201,162,90,.05); border:1px solid var(--line-soft); border-radius:4px; font-family:"Cinzel",Georgia,serif; font-size:10px; letter-spacing:.09em; padding:9px 13px; cursor:pointer; }
-    button:hover,button:focus-visible { color:var(--paper); border-color:rgba(201,162,90,.42); background:rgba(201,162,90,.12); outline:none; }
-    .body { flex:1; display:grid; grid-template-columns:1fr 300px; min-height:0; }
-    main { padding:18px 22px; overflow:auto; min-width:0; }
-    .tools { display:flex; gap:10px; margin-bottom:14px; }
-    input { flex:1; min-width:0; background:rgba(0,0,0,.3); border:1px solid var(--line-soft); border-radius:4px; color:var(--paper); padding:9px 12px; outline:none; font-family:"Spectral",Georgia,serif; }
-    input:focus { border-color:rgba(201,162,90,.48); box-shadow:0 0 0 2px rgba(201,162,90,.08); }
-    input::placeholder { color:#6f6553; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(112px,1fr)); gap:10px; }
-    .card { min-height:138px; background:rgba(14,11,7,.42); border:1px solid var(--line-soft); border-radius:4px; padding:11px; position:relative; cursor:pointer; }
-    .card:hover,.card.selected { border-color:rgba(201,162,90,.5); background:rgba(201,162,90,.1); }
-    .card.equipped:after { content:""; position:absolute; top:5px; right:5px; width:7px; height:7px; background:var(--gold); transform:rotate(45deg); box-shadow:0 0 6px rgba(216,181,107,.8); }
-    .icon { width:50px; height:50px; object-fit:contain; display:block; margin:3px auto 9px; filter:drop-shadow(0 4px 8px rgba(0,0,0,.7)); }
-    .name { font-family:"Cinzel",Georgia,serif; font-size:11px; letter-spacing:.025em; line-height:1.35; text-align:center; }
-    .amount { position:absolute; right:8px; bottom:6px; color:var(--gold); font:600 11px ui-monospace,Consolas,monospace; }
-    .source { position:absolute; top:7px; left:7px; font:8px ui-monospace,Consolas,monospace; letter-spacing:.1em; color:var(--muted); text-transform:uppercase; }
-    aside { border-left:1px solid var(--line-soft); padding:22px; overflow:auto; background:rgba(8,6,3,.4); }
-    aside .hero { width:82px; height:82px; display:block; margin:10px auto 18px; object-fit:contain; }
-    aside h2 { margin:0 0 7px; font-family:"Cinzel",Georgia,serif; font-weight:600; font-size:20px; letter-spacing:.03em; }
-    aside p { color:var(--muted); font:13px/1.55 "Spectral",Georgia,serif; }
-    dl { margin:18px 0; font:10px/1.9 ui-monospace,Consolas,monospace; }
-    dt { float:left; clear:left; color:var(--muted); text-transform:uppercase; letter-spacing:.1em; }
-    dd { text-align:right; color:var(--text); }
-    .actions { display:flex; flex-direction:column; gap:8px; }
-    .use { width:100%; color:#1a1306; background:linear-gradient(180deg,#dcb96e,var(--gold-deep)); border-color:var(--gold-deep); font-weight:700; }
-    .use:hover,.use:focus-visible { color:#1a1306; background:#e2c27d; }
-    .equip { width:100%; }
-    .equip.on { color:var(--paper); border-color:rgba(201,162,90,.42); }
-    .drop { width:100%; }
-    .drop:hover { border-color:rgba(190,80,60,.55); color:#e8b3a3; }
-    .empty { padding:60px 20px; text-align:center; color:var(--muted); font-style:italic; }
-    footer { padding:10px 28px 14px; color:#6f6553; font:9px ui-monospace,Consolas,monospace; letter-spacing:.025em; background:rgba(10,7,3,.35); }
-    @media(max-width:820px){ .body{grid-template-columns:1fr}.body aside{display:none}.shell{width:94vw} }
-    @media(prefers-reduced-motion:reduce){ *{scroll-behavior:auto!important;transition:none!important} }
+    body { background:radial-gradient(ellipse at 50% 42%, rgba(16,11,4,.55), rgba(6,4,2,.78)); }
+
+    /* ---------------------------------------------------------- the window */
+    .app {
+      position:fixed; left:50%; top:50%;
+      transform:translate(-50%,-50%);
+      width:min(980px, calc(100vw - 32px));
+      height:min(720px, calc(100vh - 32px));
+      display:flex; flex-direction:column;
+      background:linear-gradient(180deg, rgba(21,15,8,.97), rgba(13,9,4,.97));
+      border:1px solid var(--line);
+      box-shadow:0 34px 90px rgba(0,0,0,.72), 0 0 0 1px rgba(0,0,0,.55), inset 0 0 60px rgba(0,0,0,.35);
+      user-select:none;
+      will-change:transform;
+      contain:layout paint;
+    }
+    body.dragging * { cursor:grabbing !important; }
+    body.resizing * { cursor:nwse-resize !important; }
+    @media (prefers-reduced-motion:reduce){ *{transition:none!important} }
+    .app::before, .app::after { content:""; position:absolute; width:9px; height:9px; background:var(--gold); transform:rotate(45deg); box-shadow:0 0 10px rgba(216,181,107,.55); z-index:3; pointer-events:none; }
+    .app::before { top:-1px; left:-1px; }
+    .app::after { bottom:-1px; right:-1px; }
+
+    /* ------------------------------------------------------------- header */
+    .topbar { flex:none; display:flex; align-items:center; gap:18px; padding:15px 22px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(201,162,90,.08), transparent); cursor:grab; touch-action:none; }
+    .title { flex:1; display:flex; align-items:center; gap:12px; font-family:"Cinzel",Georgia,serif; font-size:15px; font-weight:700; letter-spacing:.34em; text-transform:uppercase; color:var(--gold-bright); white-space:nowrap; }
+    .title:before, .title:after { content:""; flex:1; height:1px; background:linear-gradient(90deg, transparent, var(--line)); }
+    .title:after { background:linear-gradient(90deg, var(--line), transparent); }
+    .meta { flex:none; display:flex; gap:14px; font:11px ui-monospace,Consolas,monospace; color:var(--muted); white-space:nowrap; }
+    .meta b { color:var(--gold); font-weight:600; }
+    .searchrow { flex:none; padding:12px 22px; border-bottom:1px solid var(--line-soft); }
+    .searchrow input { width:100%; background:rgba(0,0,0,.3); border:1px solid var(--line-soft); border-radius:3px; color:var(--paper); padding:9px 12px; outline:none; font:14px "Spectral",Georgia,serif; user-select:text; }
+    .searchrow input:focus { border-color:rgba(201,162,90,.5); box-shadow:0 0 0 2px rgba(201,162,90,.08); }
+    .searchrow input::placeholder { color:#6f6553; letter-spacing:.04em; }
+
+    /* -------------------------------------------------------- slot grid */
+    .gridwrap { flex:1; min-height:0; overflow-y:auto; padding:18px 22px; display:grid; grid-template-columns:repeat(auto-fill, minmax(64px, 1fr)); gap:10px; align-content:start; scrollbar-width:thin; scrollbar-color:rgba(201,162,90,.3) transparent; }
+    .gridwrap::-webkit-scrollbar { width:8px; }
+    .gridwrap::-webkit-scrollbar-thumb { background:rgba(201,162,90,.3); border-radius:4px; }
+    .slot { position:relative; aspect-ratio:1/1; display:grid; place-items:center; padding:0; border:1px solid var(--line-soft); border-radius:3px; background:rgba(0,0,0,.32); box-shadow:inset 0 0 12px rgba(0,0,0,.5); cursor:pointer; font:inherit; color:inherit; }
+    .slot img { width:72%; height:72%; object-fit:contain; pointer-events:none; -webkit-user-drag:none; filter:drop-shadow(0 3px 6px rgba(0,0,0,.6)); }
+    .slot:not(.empty):hover { border-color:rgba(216,181,107,.55); background:rgba(201,162,90,.08); }
+    .slot.sel { border-color:var(--gold); background:rgba(201,162,90,.12); box-shadow:0 0 0 1px rgba(216,181,107,.45), 0 0 16px rgba(216,181,107,.22), inset 0 0 12px rgba(0,0,0,.5); }
+    .slot.eq { border-color:rgba(216,181,107,.42); }
+    .slot.empty { cursor:default; background:rgba(0,0,0,.16); border-color:rgba(201,162,90,.07); box-shadow:inset 0 0 10px rgba(0,0,0,.35); }
+    .slot .qty { position:absolute; right:4px; bottom:2px; font:600 9px ui-monospace,Consolas,monospace; color:var(--gold-bright); text-shadow:0 1px 2px #000; pointer-events:none; }
+    .slot .eqd { position:absolute; top:4px; right:4px; width:7px; height:7px; background:var(--gold); transform:rotate(45deg); box-shadow:0 0 8px rgba(216,181,107,.9); pointer-events:none; }
+    .slot[draggable="true"] { cursor:grab; }
+    .slot.dragging { opacity:.35; }
+    .slot.drop-hint { border-color:var(--gold); border-style:dashed; background:rgba(201,162,90,.14); box-shadow:0 0 0 1px rgba(216,181,107,.4), 0 0 14px rgba(216,181,107,.25); }
+
+    /* ------------------------------------------------------- action bar */
+    .actionbar { flex:none; display:flex; align-items:center; gap:18px; padding:14px 22px; border-top:1px solid var(--line); background:rgba(0,0,0,.26); }
+    .pick { flex:1; min-width:0; display:flex; align-items:center; gap:14px; }
+    .pick .frame { width:66px; height:66px; flex:none; display:grid; place-items:center; border:1px solid var(--line); outline:1px solid rgba(0,0,0,.6); outline-offset:-4px; border-radius:3px; background:radial-gradient(circle at 50% 36%, rgba(216,181,107,.14), rgba(0,0,0,.42)); box-shadow:inset 0 0 20px rgba(0,0,0,.55); }
+    .pick .frame img { width:50px; height:50px; object-fit:contain; pointer-events:none; -webkit-user-drag:none; filter:drop-shadow(0 4px 10px rgba(0,0,0,.7)); }
+    .picktext { min-width:0; }
+    .picktext .nm { font-family:"Cinzel",Georgia,serif; font-size:clamp(15px, 1.5vw, 19px); font-weight:600; color:var(--gold-bright); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-shadow:0 2px 5px rgba(0,0,0,.6); }
+    .picktext .cat { margin-top:3px; font:10px ui-monospace,Consolas,monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .picktext .desc { margin:5px 0 0; font:12.5px/1.45 "Spectral",Georgia,serif; color:var(--text); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .picktext .facts { margin-top:4px; font:10px ui-monospace,Consolas,monospace; color:var(--gold); letter-spacing:.08em; }
+    .actions { flex:none; display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .act { display:flex; align-items:center; gap:9px; padding:10px 13px; border:1px solid var(--line); border-radius:3px; background:rgba(0,0,0,.3); color:var(--paper); cursor:pointer; box-shadow:inset 0 0 14px rgba(0,0,0,.35); }
+    .act:hover,.act:focus-visible { border-color:rgba(216,181,107,.6); background:linear-gradient(180deg, rgba(201,162,90,.16), rgba(0,0,0,.3)); outline:none; }
+    .act .glyph { font-size:14px; color:var(--gold); text-shadow:0 0 8px rgba(216,181,107,.5); }
+    .act .l { font-family:"Cinzel",Georgia,serif; font-weight:700; font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:var(--gold-bright); }
+    .act.equipping { border-color:rgba(216,181,107,.65); background:linear-gradient(180deg, rgba(201,162,90,.22), rgba(0,0,0,.32)); box-shadow:0 0 14px rgba(201,162,90,.16), inset 0 0 14px rgba(0,0,0,.35); }
+    .act.dropping:hover { border-color:rgba(198,88,66,.65); }
+    .act.giving:hover { border-color:rgba(122,158,204,.6); }
+
+    /* ------------------------------------------------------------- footer */
+    .foot { flex:none; padding:10px 30px 12px 22px; border-top:1px solid var(--line-soft); display:flex; justify-content:space-between; align-items:center; gap:14px; background:rgba(0,0,0,.22); }
+    .foot .hint { font:10px ui-monospace,Consolas,monospace; color:#6f6553; letter-spacing:.05em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .foot .btns { flex:none; display:flex; gap:8px; }
+    .foot button { background:transparent; border:1px solid var(--line-soft); border-radius:3px; color:var(--muted); font-family:"Cinzel",Georgia,serif; font-size:10px; letter-spacing:.18em; padding:7px 13px; cursor:pointer; }
+    .foot button:hover { color:var(--gold-bright); border-color:rgba(216,181,107,.5); }
+    .grip { position:absolute; right:0; bottom:0; width:26px; height:26px; z-index:6; cursor:nwse-resize; touch-action:none; }
+    .grip::before, .grip::after { content:""; position:absolute; right:5px; height:1px; background:rgba(216,181,107,.85); transform:rotate(45deg); }
+    .grip::before { bottom:10px; width:12px; }
+    .grip::after { bottom:5px; width:7px; }
+    .toast { position:absolute; left:50%; bottom:110px; transform:translateX(-50%); background:rgba(26,17,9,.94); border:1px solid rgba(198,88,66,.55); color:#e8c8bf; font:13px "Spectral",Georgia,serif; padding:10px 20px; border-radius:3px; opacity:0; transition:opacity .25s; pointer-events:none; max-width:70%; box-shadow:0 8px 24px rgba(0,0,0,.55); z-index:8; }
+    .toast.show { opacity:1; }
+
+    /* compact mode: the window itself narrowed, or a tiny viewport */
+    .app.narrow .actionbar { flex-direction:column; align-items:stretch; gap:10px; }
+    .app.narrow .actions { justify-content:flex-start; }
+    .app.narrow .picktext .desc { -webkit-line-clamp:1; }
+    .app.narrow .gridwrap { grid-template-columns:repeat(auto-fill, minmax(54px, 1fr)); }
+    .app.narrow .meta { display:none; }
+    @media (max-width:640px) {
+      .actionbar { flex-direction:column; align-items:stretch; gap:10px; }
+      .actions { justify-content:flex-start; }
+      .picktext .desc { -webkit-line-clamp:1; }
+      .gridwrap { grid-template-columns:repeat(auto-fill, minmax(54px, 1fr)); }
+      .meta { display:none; }
+    }
   </style>
 </head>
 <body>
-  <section class="shell">
-    <header>
-      <div><div class="eyebrow">Possessions</div><h1 id="title">Inventory</h1></div>
-      <div class="stats"><div class="pill" id="slots">0 / 0 slots</div><div class="pill" id="weight">0 / 0 weight</div><span class="keyhint" id="keyhint">I opens &middot; TAB closes</span><button id="refresh">Refresh</button><button id="close">Close</button></div>
+  <div class="app">
+    <header class="topbar">
+      <div class="title">Inventory</div>
+      <div class="meta"><span><b id="used">0</b>/<span id="cap">0</span> slots</span><span><b id="wt">0.0</b>/<span id="maxwt">0.0</span> kg</span></div>
     </header>
-    <div class="body">
-      <main><div class="tools"><input id="search" placeholder="Search items…" /></div><div class="grid" id="grid"></div></main>
-      <aside id="detail"><div class="eyebrow">Item details</div><p>Select an item to inspect it.</p></aside>
-    </div>
-    <footer>Custom possessions and in-game items share this view; their authority remains separate.</footer>
-  </section>
+    <div class="searchrow"><input id="search" placeholder="Search the trunk…" spellcheck="false" /></div>
+    <main class="gridwrap" id="rows"></main>
+    <section class="actionbar">
+      <div class="pick" id="dbody">
+        <div class="frame"><img id="dicon" src="fw://resources/hmp-inventory/dist/icons/item.svg" alt="" /></div>
+        <div class="picktext">
+          <div class="nm" id="dname">Choose a slot</div>
+          <div class="cat" id="dcat">the trunk is yours</div>
+          <p class="desc" id="ddesc">Click any slot in the grid to inspect it here — its actions appear on the right.</p>
+          <div class="facts" id="dfacts"></div>
+        </div>
+      </div>
+      <div class="actions" id="dactions"></div>
+    </section>
+    <footer class="foot">
+      <span class="hint">Drag slots to rearrange · click a slot to act · drag the header to move · corner grip resizes</span>
+      <span class="btns"><button id="refresh">REFRESH</button><button id="close">CLOSE</button></span>
+    </footer>
+    <div class="grip" id="grip" title="Resize"></div>
+    <div class="toast" id="toast"></div>
+  </div>
   <script>
     const send=(name,payload)=>{try{callEvent(name,JSON.stringify(payload||{}))}catch(_){}};
-    let data={items:[],container:{}},selected=null,query="";
-    const esc=(s)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"\x26amp;","<":"\x26lt;",">":"\x26gt;",'"':"\x26quot;","'":"\x26#39;"}[c]));
+    let data={items:[],container:{}},selectedKey=null,query="",toastTimer=0,actionStamp=0,lastAnswered=0,lastRows=[],pendingMove=null;
+    const esc=(s)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
     const icon=(url)=>/^(?:https?|fw):\/\//i.test(String(url||""))?String(url):"fw://resources/hmp-inventory/dist/icons/item.svg";
-    // A potion is "equipped" while it sits on the potion wheel rather than in storage.
+    const $=(id)=>document.getElementById(id);
+    const clampNum=(v,a,b)=>Math.min(Math.max(v,a),b);
+    // A potion is "equipped" while it sits on the potion wheel instead of storage.
     const isPotion=(i)=>i.source==="native"&&(i.holder==="HealthPotionStorage"||i.holder==="SanctuaryWheel");
     const equippedOf=(i)=>i.source==="native"&&(i.kind==="mount"||i.kind==="gear"?i.equipped===true:isPotion(i)&&i.holder==="SanctuaryWheel");
     const equippableOf=(i)=>i.source==="native"&&(i.kind==="mount"||i.kind==="gear"||isPotion(i));
-    const droppableOf=(i)=>!(i.source==="native"&&(i.itemId||"").toLowerCase()==="knuts"||i.name==="native:galleons");
-    // TAB toggles the screen closed (the HUD shortcut opens it with I); Escape is a courtesy extra.
+    const droppableOf=(i)=>!(i.source==="native"&&((i.itemId||"").toLowerCase()==="knuts"||i.name==="native:galleons"));
+    // Stable identity: survives refreshes (a stale object reference would not).
+    const itemKey=(i)=>i.source==="native"?`n:${i.itemId}:${i.variation||""}`:`c:${i.slot}`;
+    const selected=()=>data.items.find(i=>itemKey(i)===selectedKey)||null;
+    function toast(message){
+      const t=$("toast");t.textContent=String(message||"");t.classList.add("show");
+      clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),4600);
+    }
+    // A button press that gets neither a refreshed model nor an actionError back
+    // means the server-side hmp-inventory never handled it — i.e. the resource on
+    // the server is an older build. Say so instead of failing silently.
+    function watchedSend(name,payload){
+      actionStamp++;const stamp=actionStamp;
+      send(name,payload);
+      setTimeout(()=>{if(stamp===actionStamp&&lastAnswered<stamp)toast("The server did not answer. Update the hmp-inventory resource on the server, then restart it.");},1900);
+    }
+    const WALK_KEYS=["w","a","s","d","c","shift"];
     window.addEventListener("keydown",(event)=>{
       const key=String(event.key||"").toLowerCase();
-      if(key==="tab"||key==="escape"){event.preventDefault();event.stopPropagation();send("close",{});}
+      if(key==="tab"||key==="escape"){event.preventDefault();event.stopPropagation();send("close",{});return;}
+      // Movement handoff: while the search box is not being typed in, W/A/S/D/C/Shift
+      // go to the game so the character can walk with the inventory open. The client
+      // unfocuses the view; releasing every movement key brings focus back.
+      if(WALK_KEYS.includes(key)&&document.activeElement!==$("search")){
+        event.preventDefault();
+        send("walk",{});
+      }
     },true);
-    function visible(){return data.items.filter(i=>!query||(`${i.label} ${i.name} ${i.itemId||""}`).toLowerCase().includes(query));}
-    function renderGrid(){const rows=visible();document.querySelector("#grid").innerHTML=rows.length?rows.map((i,n)=>`<article class="card ${selected===i?"selected":""} ${equippedOf(i)?"equipped":""}" data-item="${n}"><span class="source">${i.source==="native"?"in-game":"custom"}</span><img class="icon" src="${esc(icon(i.icon))}"/><div class="name">${esc(i.label)}</div><span class="amount">×${i.amount}</span></article>`).join(""):`<div class="empty">No items match this view.</div>`;document.querySelectorAll("[data-item]").forEach(b=>b.onclick=()=>{selected=rows[Number(b.dataset.item)];renderGrid();renderDetail()});}
-    function renderDetail(){
-      const a=document.querySelector("#detail");
-      if(!selected){a.innerHTML=`<div class="eyebrow">Item details</div><p>Select an item to inspect it.</p>`;return}
-      const meta=selected.metadata&&Object.keys(selected.metadata).length?`<p>${esc(JSON.stringify(selected.metadata))}</p>`:"";
-      const equipped=equippedOf(selected),equippable=equippableOf(selected),usable=selected.usable===true,droppable=droppableOf(selected);
-      a.innerHTML=`<div class="eyebrow">${selected.source==="native"?"In-game item":"Custom item"}</div><img class="hero" src="${esc(icon(selected.icon))}"/><h2>${esc(selected.label)}</h2><p>${esc(selected.description||"No description.")}</p><dl><dt>Amount</dt><dd>${selected.amount}</dd><dt>Category</dt><dd>${esc(selected.category)}</dd>${selected.holder?`<dt>Game holder</dt><dd>${esc(selected.holder)}</dd>`:""}${selected.source==="native"&&(selected.kind==="mount"||selected.kind==="gear"||isPotion(selected))?`<dt>Equipped</dt><dd>${equipped?"yes":"no"}</dd>`:""}${selected.weight?`<dt>Weight</dt><dd>${selected.weight.toFixed(2)}</dd>`:""}</dl>${meta}<div class="actions">${equippable?`<button class="equip ${equipped?"on":""}" id="equip">${equipped?"Unequip":"Equip"}</button>`:""}${usable?`<button class="use" id="use">Use item</button>`:""}${droppable?`<button class="drop" id="drop">Drop</button>`:""}</div>`;
-      const equipB=document.querySelector("#equip");if(equipB)equipB.onclick=()=>send("equip",{source:"native",itemId:selected.itemId,variation:selected.variation||"",equipped:!equipped});
-      const useB=document.querySelector("#use");if(useB)useB.onclick=()=>send("use",selected.source==="native"?{source:"native",itemId:selected.itemId,variation:selected.variation||""}:{source:"custom",slot:selected.slot});
-      const dropB=document.querySelector("#drop");if(dropB)dropB.onclick=()=>send("drop",selected.source==="native"?{source:"native",itemId:selected.itemId,variation:selected.variation||""}:{source:"custom",slot:selected.slot});
+
+    /* ------------------------------------------- floating window geometry */
+    const panel=document.querySelector(".app");
+    const P={x:0,y:0,w:0,h:0};
+    try{
+      const saved=JSON.parse(localStorage.getItem("hmp.inventory.panel")||"null");
+      if(saved&&Number.isFinite(saved.w)&&Number.isFinite(saved.h)&&Number.isFinite(saved.x)&&Number.isFinite(saved.y))Object.assign(P,saved);
+    }catch(_){}
+    let persistTimer=0;
+    function persistPanel(){try{localStorage.setItem("hmp.inventory.panel",JSON.stringify(P));}catch(_){}}
+    function persistSoon(){clearTimeout(persistTimer);persistTimer=setTimeout(persistPanel,400);}
+    function applyPanel(){
+      const vw=window.innerWidth,vh=window.innerHeight;
+      const minW=Math.min(420,vw),minH=Math.min(340,vh);
+      if(!P.w||!P.h){P.w=Math.min(980,vw-32);P.h=Math.min(720,vh-32);P.x=(vw-P.w)/2;P.y=(vh-P.h)/2;}
+      P.w=clampNum(P.w,minW,vw);
+      P.h=clampNum(P.h,minH,vh);
+      P.x=clampNum(P.x,0,Math.max(0,vw-P.w));
+      P.y=clampNum(P.y,0,Math.max(0,vh-P.h));
+      panel.style.left="0px";panel.style.top="0px";
+      panel.style.width=P.w+"px";panel.style.height=P.h+"px";
+      panel.style.transform=`translate3d(${P.x}px, ${P.y}px, 0)`;
+      panel.classList.toggle("narrow",P.w<640);
     }
-    function render(){document.querySelector("#title").textContent=data.title||"Inventory";document.querySelector("#slots").textContent=`${data.usedSlots||0} / ${data.container?.slots||0} slots`;document.querySelector("#weight").textContent=`${Number(data.weight||0).toFixed(1)} / ${Number(data.container?.maxWeight||0).toFixed(1)} weight`;renderGrid();renderDetail()}
-    document.querySelector("#search").oninput=e=>{query=e.target.value.trim().toLowerCase();renderGrid();renderDetail()};
-    document.querySelector("#close").onclick=()=>send("close",{});document.querySelector("#refresh").onclick=()=>send("refresh",{});
-    window.addEventListener("model",event=>{data=event.detail||{items:[],container:{}};selected=null;render()});
-    window.addEventListener("configure",event=>{const c=event&&event.detail||{};if(c.contract&&c.contract!=="hmp.inventory.ui/v1")console.warn("[cah-hud] unsupported inventory contract",c.contract)});
-    send("ready");
-    render();
+    applyPanel();
+    window.addEventListener("resize",()=>{applyPanel();persistSoon();});
+    function dragFrom(handle){
+      handle.addEventListener("pointerdown",(event)=>{
+        if(event.button!==0)return;
+        if(event.target.closest("button, input, a, .grip"))return;
+        event.preventDefault();
+        const sx=event.clientX,sy=event.clientY,ox=P.x,oy=P.y;
+        let frame=0,nx=ox,ny=oy;
+        document.body.classList.add("dragging");
+        const onMove=(ev)=>{
+          nx=clampNum(ox+ev.clientX-sx,0,Math.max(0,window.innerWidth-P.w));
+          ny=clampNum(oy+ev.clientY-sy,0,Math.max(0,window.innerHeight-P.h));
+          if(!frame)frame=requestAnimationFrame(()=>{frame=0;P.x=nx;P.y=ny;panel.style.transform=`translate3d(${nx}px, ${ny}px, 0)`;});
+        };
+        const onEnd=()=>{
+          handle.removeEventListener("pointermove",onMove);
+          handle.removeEventListener("pointerup",onEnd);
+          handle.removeEventListener("pointercancel",onEnd);
+          if(frame)cancelAnimationFrame(frame);
+          document.body.classList.remove("dragging");
+          persistPanel();
+        };
+        try{handle.setPointerCapture(event.pointerId);}catch(_){}
+        handle.addEventListener("pointermove",onMove);
+        handle.addEventListener("pointerup",onEnd);
+        handle.addEventListener("pointercancel",onEnd);
+      });
+    }
+    dragFrom(document.querySelector(".topbar"));
+    $("grip").addEventListener("pointerdown",(event)=>{
+      if(event.button!==0)return;
+      event.preventDefault();event.stopPropagation();
+      const sx=event.clientX,sy=event.clientY,ow=P.w,oh=P.h;
+      const minW=Math.min(420,window.innerWidth),minH=Math.min(340,window.innerHeight);
+      let frame=0,nw=ow,nh=oh;
+      document.body.classList.add("resizing");
+      const onMove=(ev)=>{
+        nw=clampNum(ow+ev.clientX-sx,minW,Math.max(minW,window.innerWidth-P.x));
+        nh=clampNum(oh+ev.clientY-sy,minH,Math.max(minH,window.innerHeight-P.y));
+        if(!frame)frame=requestAnimationFrame(()=>{frame=0;P.w=nw;P.h=nh;applyPanel();});
+      };
+      const onEnd=()=>{
+        $("grip").removeEventListener("pointermove",onMove);
+        $("grip").removeEventListener("pointerup",onEnd);
+        $("grip").removeEventListener("pointercancel",onEnd);
+        if(frame)cancelAnimationFrame(frame);
+        document.body.classList.remove("resizing");
+        persistPanel();
+      };
+      try{$("grip").setPointerCapture(event.pointerId);}catch(_){}
+      $("grip").addEventListener("pointermove",onMove);
+      $("grip").addEventListener("pointerup",onEnd);
+      $("grip").addEventListener("pointercancel",onEnd);
+    });
+
+    /* ------------------------------------------------------------- render */
+    function visible(){return data.items.filter(i=>!query||(`${i.label} ${i.name} ${i.itemId||""}`).toLowerCase().includes(query));}
+    // Cells are real container slots: customs sit in their slot number (gaps
+    // show as empty cells), native game items follow the trunk; a search
+    // falls back to a flat match list without drag targets.
+    function slotCell(i,n,slot){
+      const key=itemKey(i);
+      const custom=i.source==="custom"&&slot!==null;
+      return `<button class="slot ${selectedKey===key?"sel":""} ${equippedOf(i)?"eq":""}"${custom?` draggable="true" data-slot="${Number(i.slot)}"`:""} data-item="${n}" title="${esc(i.label)}" type="button">`+
+        `<img src="${esc(icon(i.icon))}" alt="" loading="lazy" decoding="async"/>`+
+        `<span class="qty">×${i.amount}</span>`+
+        `${equippedOf(i)?'<span class="eqd" title="Equipped"></span>':""}`+
+        `</button>`;
+    }
+    function renderRows(){
+      if(query){
+        const rows=visible();
+        lastRows=rows;
+        const total=Math.max(Number(data.container?.slots)||0,rows.length);
+        let html="";
+        rows.forEach((i,n)=>{html+=slotCell(i,n,null);});
+        for(let n=rows.length;n<total;n++)html+=`<span class="slot empty" aria-hidden="true"></span>`;
+        $("rows").innerHTML=html;
+        return;
+      }
+      const customs=data.items.filter(i=>i.source==="custom");
+      const natives=data.items.filter(i=>i.source==="native");
+      const rows=[...customs,...natives];
+      lastRows=rows;
+      const order=new Map(rows.map((i,n)=>[i,n]));
+      const bySlot=new Map(customs.map(i=>[Number(i.slot),i]));
+      const total=Math.max(Number(data.container?.slots)||0,customs.length);
+      let html="";
+      for(let s=1;s<=total;s++){
+        const item=bySlot.get(s);
+        html+=item?slotCell(item,order.get(item),s):`<span class="slot empty" data-slot="${s}" aria-hidden="true" title="Empty slot"></span>`;
+      }
+      for(const item of natives)html+=slotCell(item,order.get(item),null);
+      $("rows").innerHTML=html;
+    }
+    // One delegated listener instead of re-binding every slot on each render.
+    $("rows").addEventListener("click",(event)=>{
+      const slot=event.target.closest("[data-item]");
+      if(!slot)return;
+      const item=lastRows[Number(slot.dataset.item)];
+      if(!item)return;
+      selectedKey=itemKey(item);lastAnswered=actionStamp;
+      renderRows();renderDetail();
+    });
+    // Drag a filled slot onto any other slot cell to rearrange or swap.
+    // Native game items are not in the container, so they carry no data-slot
+    // and can neither be dragged nor be dropped onto.
+    let dragFromSlot=null;
+    function clearDragHints(){
+      const dragging=document.querySelector(".slot.dragging");
+      if(dragging)dragging.classList.remove("dragging");
+      const hint=document.querySelector(".slot.drop-hint");
+      if(hint)hint.classList.remove("drop-hint");
+    }
+    $("rows").addEventListener("dragstart",(event)=>{
+      const cell=event.target.closest("[draggable]");
+      if(!cell||cell.dataset.slot===void 0){event.preventDefault();return;}
+      dragFromSlot=Number(cell.dataset.slot);
+      cell.classList.add("dragging");
+      try{event.dataTransfer.setData("text/plain",String(dragFromSlot));}catch(_){}
+      try{event.dataTransfer.effectAllowed="move";}catch(_){}
+    });
+    $("rows").addEventListener("dragover",(event)=>{
+      if(dragFromSlot===null)return;
+      const cell=event.target.closest("[data-slot]");
+      if(!cell)return;
+      event.preventDefault();
+      try{event.dataTransfer.dropEffect="move";}catch(_){}
+      const hint=document.querySelector(".slot.drop-hint");
+      if(hint&&hint!==cell)hint.classList.remove("drop-hint");
+      cell.classList.add("drop-hint");
+    });
+    $("rows").addEventListener("drop",(event)=>{
+      if(dragFromSlot===null)return;
+      const cell=event.target.closest("[data-slot]");
+      if(!cell)return;
+      event.preventDefault();
+      const from=dragFromSlot;
+      dragFromSlot=null;
+      clearDragHints();
+      const to=Number(cell.dataset.slot);
+      if(!Number.isInteger(to)||to===from)return;
+      pendingMove={from,to};
+      watchedSend("move",{from,to});
+    });
+    $("rows").addEventListener("dragend",()=>{dragFromSlot=null;clearDragHints();});
+    function actionButton(glyph,label,sub,cls,handler){
+      const b=document.createElement("button");
+      b.className="act "+cls;
+      b.title=sub;
+      b.innerHTML=`<span class="glyph">${glyph}</span><span class="l">${label}</span>`;
+      b.onclick=handler;return b;
+    }
+    function renderDetail(){
+      const stack=$("dactions");stack.innerHTML="";
+      const i=selected();
+      if(!i){
+        $("dicon").src=icon("");$("dname").textContent="Choose a slot";
+        $("dcat").textContent="the trunk is yours";
+        $("ddesc").textContent="Click any slot in the grid to inspect it here — its actions appear on the right.";
+        $("dfacts").textContent="";return;
+      }
+      const equipped=equippedOf(i),equippable=equippableOf(i);
+      $("dicon").src=icon(i.icon);$("dname").textContent=i.label;
+      const bits=[i.category||"—",i.source==="native"?(i.holder||"in-game"):"custom item"];
+      if(i.source==="native"&&(i.kind==="mount"||i.kind==="gear"||isPotion(i)))bits.push(equipped?"equipped":"not equipped");
+      $("dcat").textContent=bits.join(" · ");
+      $("ddesc").textContent=i.description||"No description.";
+      $("dfacts").textContent=`×${i.amount}`+(i.weight?` · ${Number(i.weight).toFixed(2)} kg`:"");
+      const target=i.source==="native"?{source:"native",itemId:i.itemId,variation:i.variation||""}:{source:"custom",slot:i.slot};
+      if(equippable)stack.appendChild(actionButton("◈",equipped?"UNEQUIP":"EQUIP",i.kind==="mount"?"Carries it in the active slot":i.kind==="gear"?"Wears it on the avatar":"Moves it onto the potion wheel",equipped?"equipping":"",()=>watchedSend("equip",{...target,equipped:!equipped})));
+      if(i.usable)stack.appendChild(actionButton("✦","USE","Uses it right away","",()=>watchedSend("use",target)));
+      stack.appendChild(actionButton("➤","GIVE","Hands the stack to the nearest player","giving",()=>watchedSend("give",target)));
+      if(droppableOf(i))stack.appendChild(actionButton("✕","DROP","Sets it down on the ground for anyone to take","dropping",()=>watchedSend("drop",target)));
+    }
+    function render(){
+      $("used").textContent=String(data.items.filter(i=>i.source==="custom").length);$("cap").textContent=String(data.container?.slots||0);
+      $("wt").textContent=Number(data.weight||0).toFixed(1);$("maxwt").textContent=Number(data.container?.maxWeight||0).toFixed(1);
+      if(pendingMove){
+        if(selectedKey===`c:${pendingMove.from}`)selectedKey=`c:${pendingMove.to}`;
+        pendingMove=null;
+      }
+      if(selectedKey&&!data.items.some(i=>itemKey(i)===selectedKey))selectedKey=null;
+      renderRows();renderDetail();
+    }
+    $("search").oninput=e=>{query=e.target.value.trim().toLowerCase();renderRows();};
+    $("close").onclick=()=>send("close",{});
+    $("refresh").onclick=()=>send("refresh",{});
+    window.addEventListener("model",event=>{data=event.detail||{items:[],container:{}};lastAnswered=actionStamp;render();});
+    window.addEventListener("actionError",event=>{const d=event&&event.detail||{};lastAnswered=actionStamp;pendingMove=null;toast(d.message||"That did not work.");});
+    window.addEventListener("configure",event=>{const c=event&&event.detail||{};if(c.contract&&c.contract!=="hmp.inventory.ui/v1")console.warn("[inventory] unsupported contract",c.contract);});
+    send("ready");render();
   </script>
 </body>
 </html>
