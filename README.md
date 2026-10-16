@@ -1,5 +1,5 @@
 cah-hud Resource Repository
-========================
+=======================
 
 This repository contains the source code and release files for the cah-hud resource, a modular HUD for HogwartsMP servers.
 
