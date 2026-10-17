@@ -793,7 +793,7 @@
 
       // -----------------------------------------------------------------
       // Spell flames: four candle flames made purely of additive glow dots.
-      // One canvas, pooled particles, pre-rendered tint sprites, ~30 fps cap
+      // One canvas, pooled particles, pre-rendered tint sprites, ~60 fps cap
       // and the loop fully stops whenever the HUD is hidden or the tab hidden.
       // Each spell owns its colour (curated map, else a stable name hash), so
       // the same spell burns the same colour wherever it is equipped.
@@ -963,7 +963,7 @@
         var dt = Math.min(0.12, (ts - flame.last) / 1000);
         flame.last = ts;
         flame.acc += dt;
-        if (flame.acc >= 1 / 30) {
+        if (flame.acc >= 1 / 60) {
           stepFlames(flame.acc);
           drawFlames();
           flame.acc = 0;

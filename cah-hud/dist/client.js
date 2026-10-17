@@ -17,9 +17,13 @@
 // choices and is released on hide/disconnect), except groups whose name matches a configured
 // keep list (default: "map") so the minimap/map keeps working.
 //
-// Voice indicator: while the HUD is active, a glowing dot (Latin-1 middle dot, coloured) is drawn
-// above the player's own name - green when voice is on and working, white while talking, red when
-// voice is off or has no microphone. Fed by the Voice global every poll and on voiceStart/voiceStop.
+// Nametag overlay: the marker above every player's head (name, health, voice) is drawn by a
+// dedicated transparent web view (dist/nametags.html), not by the engine nametag layer. The engine
+// nametag only renders engine-font text, so it can never show images (house crests), a custom font
+// (Cinzel) or a redesigned health bar - and it labels players by their platform (Steam/Discord)
+// nickname instead of the roleplay name. The overlay replaces all of it: character names streamed
+// by the server, a house-tinted health bar, a voice badge (own state read locally, others relayed)
+// and per-viewer marks (curfew breakers). The engine nametags are hidden while it runs.
 (() => {
   const VIEW_URL = "fw://resources/cah-hud/dist/hud.html";
   const POLL_MS = 500;
@@ -51,6 +55,12 @@
       }
     }
     return null;
+  }
+
+  function clampNumber(value, min, max, fallback) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(max, Math.max(min, num));
   }
 
   function ensureView() {
@@ -543,72 +553,638 @@
   // Voice state changes should move the above-name icon instantly, not half a second later.
   Events.on("voiceStart", () => {
     if (visible && serverState) pushToPage();
+    ntMarkSelfVoiceDirty();
   });
   Events.on("voiceStop", () => {
     if (visible && serverState) pushToPage();
+    ntMarkSelfVoiceDirty();
   });
 
   // ---------------------------------------------------------------------------
-  // Voice indicator: a glowing dot attached to the player's own nametag (it
-  // hangs above the name and follows the body). Green while voice chat is on,
-  // brighter while talking, red when it is off/muted. The glyph is a Latin-1
-  // middle dot, which the nametag font renders reliably (geometric shapes like
-  // the black circle showed up as "?").
+  // Nametag overlay: the marker above every player's head, drawn by a dedicated
+  // transparent web view (nametags.html) instead of the engine nametag layer.
+  // Why: the engine nametag only draws engine-font text, so it can never show
+  // images (house crests), a custom font (Cinzel) or a redesigned health bar,
+  // and it labels players by their platform nickname rather than the character
+  // name. The overlay replaces all of that:
+  //   - identity: hmp-core character names, streamed by the server;
+  //   - health:   a house-tinted bar under the name (server-authoritative);
+  //   - voice:    a mic badge - own state read locally every frame, other
+  //               players relayed by the server (playerVoiceStart/Stop);
+  //   - marks:    per-viewer glyphs other resources pin through the server
+  //               export setNametagMark (hmp-schedule curfew breakers).
+  // The engine nametag layer is switched off while the overlay runs and is
+  // restored when the resource stops, so nothing is left hidden behind us.
   // ---------------------------------------------------------------------------
-  const VOICE_DOT = "\u00B7";
-  const VOICE_COLOR_ON = 0xFF53FF7A;   // green: voice is on and working
-  const VOICE_COLOR_TALKING = 0xFFFFFFFF; // white: actually talking
-  const VOICE_COLOR_OFF = 0xFFFF5A4D;  // red: voice is off or otherwise not working
+  const NT_VIEW_URL = "fw://resources/cah-hud/dist/nametags.html";
+  const NT_RAD = Math.PI / 180;
+  const NT_OCCLUSION_BUDGET = 6;   // line traces per frame (round-robin)
+  const NT_OCCLUSION_TTL = 250;    // ms an occlusion answer stays valid
+  const NT_DATA_PUSH_MS = 120;     // throttle for identity pushes to the page
+  const NT_EYE_HEIGHT = 165;       // camera-fallback origin: eye height above the player origin
+  const NT_GROUND_TTL = 3000;      // ms a ground anchor stays fresh
+  const NT_GROUND_MOVE = 60;       // cm of horizontal drift that forces a re-trace
+  const NT_GROUND_BUDGET = 4;      // ground traces per frame at most
+  const NT_GROUND_MAX_ABOVE = 400; // cm above the anchor before a player counts as airborne
+  const NT_AIR_FALLBACK = 90;      // origin-relative offset while airborne/uncalibrated
+  const NT_SELF_CAM_DIST = 100;    // camera farther than this (XY) from the body = third person
+  const NT_MIN_RANGE = 3000;       // markers must reach at least 30 m, whatever the config says
 
-  let voiceEntityId = null;
-  let voiceLabelState = null;
+  const nt = {
+    view: -1,
+    config: {
+      enabled: true, range: 12000, showSelf: true, occlusion: false,
+      height: 185, selfHeight: 185, tickMs: 150, maxMarkers: 32, fontScale: 1,
+      fov: 0, flipYaw: false, flipPitch: false,
+    },
+    roster: new Map(),   // targetId -> entry (server-streamed players)
+    marks: new Map(),    // targetId -> Set(mark) for THIS viewer
+    dirty: new Set(),    // ids whose page data needs a re-push
+    removed: [],         // ids the page still draws but should drop
+    occ: new Map(),      // targetId -> { blocked, at }
+    ground: new Map(),   // targetId -> { gz, at, x, y } terrain anchor
+    occCursor: 0,
+    lastRosterReq: 0,
+    lastDataPush: 0,
+    lastScreen: { w: 0, h: 0, at: 0 },
+    selfVoiceSig: "",
+  };
 
-  function clearVoiceLabel() {
-    if (voiceLabelState && voiceEntityId !== null && typeof Nametags !== "undefined" && Nametags &&
-        typeof Nametags.clearLabel === "function") {
-      try {
-        Nametags.clearLabel(voiceEntityId);
-      } catch (_) {
-      }
-    }
-    voiceLabelState = null;
-    voiceEntityId = null;
+  function ntSupported() {
+    return typeof Nametags !== "undefined" && !!Nametags &&
+      typeof Web !== "undefined" && !!Web && typeof Web.createView === "function";
   }
 
-  function hideVoiceIndicator() {
-    clearVoiceLabel();
-    if (typeof Nametags !== "undefined" && Nametags && typeof Nametags.setSelfVisible === "function") {
-      try {
-        Nametags.setSelfVisible(false);
-      } catch (_) {
-      }
+  function ntEnsureView() {
+    if (nt.view >= 0) return nt.view;
+    if (!ntSupported()) return -1;
+    try {
+      nt.view = Web.createView(NT_VIEW_URL, { visible: false, focus: false, zIndex: 400 });
+    } catch (_) {
+      nt.view = -1;
+    }
+    if (nt.view >= 0) {
+      Web.on(nt.view, "ready", () => {
+        ntPushConfig();
+        ntDirtyAll();
+        ntPushData(true);
+      });
+    }
+    return nt.view;
+  }
+
+  function ntApplyConfig(value) {
+    if (!value || typeof value !== "object") return;
+    const c = nt.config;
+    c.enabled = value.enabled !== false;
+    // 30 m floor: a nametag must be readable across a classroom wing, whatever
+    // a half-tuned config file says.
+    c.range = clampNumber(value.range, NT_MIN_RANGE, 20000, 12000);
+    c.tickMs = clampNumber(value.tickMs, 60, 2000, 150);
+    // Height above the GROUND (terrain-anchored): the card rides this far above
+    // the floor under the player, so the character origin's own height (pelvis
+    // or feet, depending on the build) never moves the card off the head.
+    c.height = clampNumber(value.height, 50, 500, 185);
+    // Own card override; falls back to height when unset. From the third-person
+    // camera behind the head a taller anchor can still leave the frame.
+    c.selfHeight = clampNumber(value.selfHeight, 50, 500, 185);
+    c.maxMarkers = clampNumber(value.maxMarkers, 1, 64, 32);
+    c.fontScale = clampNumber(value.fontScale, 0.5, 2.5, 1);
+    c.showSelf = value.showSelf !== false;
+    // Off by default: a wall must not delete the name off a player's head.
+    c.occlusion = value.occlusion === true;
+    c.fov = clampNumber(value.fov, 0, 179, 0);
+    c.flipYaw = value.flipYaw === true;
+    c.flipPitch = value.flipPitch === true;
+  }
+
+  function ntPushConfig() {
+    if (nt.view < 0) return;
+    try {
+      Web.emit(nt.view, "hmp-hud:nametags-config", {
+        fontScale: nt.config.fontScale,
+        showSelf: nt.config.showSelf,
+      });
+    } catch (_) {
     }
   }
 
-  function updateVoiceIndicator(state) {
-    if (typeof Nametags === "undefined" || !Nametags || typeof Nametags.setLabel !== "function") return;
-    const voice = state && state.voice;
-    const entityId = state && Number.isSafeInteger(state.playerId) ? state.playerId : null;
-    if (!voice || entityId === null) {
-      clearVoiceLabel();
+  function ntHideEngineNametags() {
+    if (typeof Nametags === "undefined" || !Nametags || typeof Nametags.setVisible !== "function") return;
+    try {
+      Nametags.setVisible(false);
+    } catch (_) {
+    }
+  }
+
+  function ntRestoreEngineNametags() {
+    if (typeof Nametags === "undefined" || !Nametags || typeof Nametags.setVisible !== "function") return;
+    try {
+      Nametags.setVisible(true);
+    } catch (_) {
+    }
+  }
+
+  function ntMarksOf(targetId) {
+    let set = nt.marks.get(targetId);
+    if (!set) {
+      set = new Set();
+      nt.marks.set(targetId, set);
+    }
+    return set;
+  }
+
+  // Server roster: identity, health, voice and positions for players near us.
+  // Positions are the two most recent samples; the render loop interpolates.
+  function ntApplyRoster(payload) {
+    const upserts = Array.isArray(payload && payload.upserts) ? payload.upserts : [];
+    const removed = Array.isArray(payload && payload.removed) ? payload.removed : [];
+    const now = Date.now();
+    for (const up of upserts) {
+      if (!up || !Number.isSafeInteger(up.i)) continue;
+      const id = up.i;
+      const prev = nt.roster.get(id);
+      const entry = prev || { px: up.x, py: up.y, pz: up.z, pt: now, t: now };
+      if (prev && (prev.x !== up.x || prev.y !== up.y || prev.z !== up.z)) {
+        entry.px = prev.x; entry.py = prev.y; entry.pz = prev.z; entry.pt = prev.t;
+        entry.x = up.x; entry.y = up.y; entry.z = up.z; entry.t = now;
+      } else if (!prev) {
+        entry.x = up.x; entry.y = up.y; entry.z = up.z; entry.t = now;
+      } else {
+        entry.x = up.x; entry.y = up.y; entry.z = up.z; entry.t = now;
+      }
+      entry.name = String(up.n || "");
+      entry.house = up.h || null;
+      entry.hp = Number.isFinite(Number(up.hp)) ? Number(up.hp) : null;
+      entry.hm = Number.isFinite(Number(up.hm)) ? Number(up.hm) : null;
+      entry.voice = up.v === 0 ? false : (up.v === 1 ? true : null);
+      entry.talking = up.t === 1;
+      entry.marks = [...(nt.marks.get(id) || [])];
+      nt.roster.set(id, entry);
+      nt.dirty.add(id);
+    }
+    for (const id of removed) {
+      if (Number.isSafeInteger(id) && nt.roster.delete(id)) nt.removed.push(id);
+    }
+  }
+
+  function ntApplyMark(payload) {
+    if (!payload || !Number.isSafeInteger(payload.playerId)) return;
+    const id = payload.playerId;
+    const mark = String(payload.mark || "").slice(0, 16);
+    if (!mark) return;
+    const set = ntMarksOf(id);
+    if (payload.on === false) set.delete(mark); else set.add(mark);
+    const entry = nt.roster.get(id);
+    if (entry) {
+      entry.marks = [...set];
+      nt.dirty.add(id);
+    } else if (serverState && serverState.playerId === id) {
+      nt.dirty.add(id);
+    }
+  }
+
+  // Own voice state lives client-side: enabled + microphone, talking right now.
+  function ntSelfVoice() {
+    if (typeof Voice === "undefined" || !Voice || typeof Voice.isEnabled !== "function") return null;
+    try {
+      const enabled = Voice.isEnabled() === true;
+      let hasMic = true;
+      if (typeof Voice.hasMicrophone === "function") hasMic = Voice.hasMicrophone() !== false;
+      const talking = typeof Voice.isTalking === "function" ? Voice.isTalking() === true : false;
+      return { enabled, hasMic, talking };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntSelfVoiceSig() {
+    const v = ntSelfVoice();
+    return v ? `${v.enabled ? 1 : 0}${v.hasMic ? 1 : 0}${v.talking ? 1 : 0}` : "";
+  }
+
+  function ntMarkSelfVoiceDirty() {
+    nt.selfVoiceSig = ""; // force the next self-data check to re-push
+  }
+
+  function ntSelfData() {
+    const state = serverState;
+    if (!state || !Number.isSafeInteger(state.playerId)) return null;
+    const voice = ntSelfVoice();
+    const character = state.character || null;
+    const house = state.house && state.house.house ? String(state.house.house).toLowerCase() : null;
+    const marks = [...(nt.marks.get(state.playerId) || [])];
+    // Health: the game's own read (LocalPlayer.stateInfo) is the authority for
+    // the own marker too — the server value comes from `player.health`, which
+    // this build may not expose, and it left the own health bar stuck hidden.
+    let hp = Number.isFinite(Number(state.health)) ? Number(state.health) : null;
+    let hm = Number.isFinite(Number(state.healthMax)) ? Number(state.healthMax) : null;
+    const vitals = nativeHealth();
+    if (vitals) {
+      if (vitals.dead === true) {
+        hp = 0;
+      } else if (vitals.health !== null) {
+        hp = vitals.health;
+        if (vitals.max) hm = vitals.max;
+      }
+    }
+    return {
+      id: state.playerId,
+      name: character && character.name ? String(character.name) : "",
+      house,
+      hp,
+      hm,
+      voice: voice ? (voice.enabled && voice.hasMic ? true : false) : null,
+      talking: voice ? voice.talking : false,
+      marks,
+    };
+  }
+
+  function ntDirtyAll() {
+    for (const id of nt.roster.keys()) nt.dirty.add(id);
+    if (serverState && Number.isSafeInteger(serverState.playerId)) nt.dirty.add(serverState.playerId);
+  }
+
+  // Throttled identity push: only rows whose signature changed leave the client.
+  function ntPushData(force) {
+    if (nt.view < 0) return;
+    const now = Date.now();
+    if (!force && now - nt.lastDataPush < NT_DATA_PUSH_MS) return;
+    const upserts = [];
+    const seen = new Set();
+    const self = ntSelfData();
+    if (self) {
+      seen.add(self.id);
+      const sig = `${self.name}|${self.house || ""}|${self.hp}|${self.hm}|${self.voice === null ? "" : (self.voice ? 1 : 0)}|${self.talking ? 1 : 0}|${self.marks.join(",")}`;
+      if (force || sig !== nt.selfVoiceSig) {
+        nt.selfVoiceSig = sig;
+        upserts.push(self);
+      }
+    }
+    for (const id of nt.dirty) {
+      if (seen.has(id)) continue;
+      const entry = nt.roster.get(id);
+      if (!entry) continue;
+      seen.add(id);
+      upserts.push({
+        id,
+        name: entry.name,
+        house: entry.house,
+        hp: entry.hp,
+        hm: entry.hm,
+        voice: entry.voice,
+        talking: entry.talking,
+        marks: entry.marks || [],
+      });
+    }
+    nt.dirty.clear();
+    const removed = nt.removed.splice(0, nt.removed.length);
+    if (!upserts.length && !removed.length) return;
+    nt.lastDataPush = now;
+    try {
+      Web.emit(nt.view, "hmp-hud:nametags-data", { upserts, removed });
+    } catch (_) {
+    }
+  }
+
+  function ntScreenSize() {
+    const now = Date.now();
+    if (now - nt.lastScreen.at < 500) return nt.lastScreen;
+    try {
+      const size = Web.getScreenSize();
+      if (size && Number(size.width) > 0 && Number(size.height) > 0) {
+        nt.lastScreen = { w: Number(size.width), h: Number(size.height), at: now };
+      }
+    } catch (_) {
+    }
+    return nt.lastScreen;
+  }
+
+  // Linear extrapolation between the last two server samples keeps markers
+  // glued to heads between roster ticks without per-frame server chatter.
+  function ntInterpolated(entry, now) {
+    const span = Math.max(50, entry.t - entry.pt);
+    let a = (now - entry.t) / span;
+    if (a > 1.3) a = 1.3;
+    if (a < 0) a = 0;
+    return {
+      x: entry.x + (entry.x - entry.px) * a,
+      y: entry.y + (entry.y - entry.py) * a,
+      z: entry.z + (entry.z - entry.pz) * a,
+    };
+  }
+
+  function ntOccluded(id, from, head) {
+    if (typeof World === "undefined" || !World || typeof World.lineTrace !== "function") return false;
+    const now = Date.now();
+    const cached = nt.occ.get(id);
+    if (cached && now - cached.at < NT_OCCLUSION_TTL) return cached.blocked;
+    if (nt.occCursor >= NT_OCCLUSION_BUDGET) return cached ? cached.blocked : false;
+    nt.occCursor++;
+    let blocked = false;
+    try {
+      const hit = World.lineTrace(
+        { x: from.x, y: from.y, z: from.z },
+        { x: head.x, y: head.y, z: head.z },
+        { channel: "camera", ignore: [id] },
+      );
+      blocked = hit !== null && hit !== undefined;
+    } catch (_) {
+      blocked = false;
+    }
+    nt.occ.set(id, { blocked, at: now });
+    return blocked;
+  }
+
+  function ntVisibleAlpha(dist) {
+    const range = nt.config.range;
+    if (dist >= range) return 0;
+    // Hold full opacity almost to the edge of the range: the marker belongs
+    // above the player it names, not in a fade band a few metres out.
+    const edge = range * 0.9;
+    if (dist <= edge) return 1;
+    return Math.max(0, 1 - (dist - edge) / (range - edge));
+  }
+
+  // Ground anchoring. The character origin sits an unknown height above the
+  // floor (some builds report the pelvis, others the feet), so a flat origin
+  // offset floats the card metres above the head. Instead the card is pinned
+  // to the terrain under the player: a cheap downward trace, cached per player
+  // and refreshed on movement, yields the floor, and the card rides
+  // config.height above it. The answer only counts while the player stands
+  // roughly on it — flyers (brooms) fail the band and fall back to an
+  // origin-relative offset until they land.
+  function ntGroundZ(id, pos, now, budget) {
+    const cached = nt.ground.get(id) || null;
+    const moved = !!cached && Math.hypot(pos.x - cached.x, pos.y - cached.y) > NT_GROUND_MOVE;
+    const stale = !cached || now - cached.at > NT_GROUND_TTL;
+    if (cached && !stale && !moved) return cached.gz;
+    if (budget.used >= NT_GROUND_BUDGET) return cached ? cached.gz : null;
+    budget.used++;
+    let gz = null;
+    try {
+      if (typeof World !== "undefined" && World && typeof World.lineTrace === "function") {
+        const hit = World.lineTrace(
+          { x: pos.x, y: pos.y, z: pos.z + 180 },
+          { x: pos.x, y: pos.y, z: pos.z - 300 },
+          { objectTypes: ["worldStatic", "shallowWater", "deepWater"] },
+        );
+        if (hit && !hit.startPenetrating && hit.location && Number.isFinite(hit.location.z)) {
+          const above = pos.z - hit.location.z;
+          if (above >= -50 && above <= NT_GROUND_MAX_ABOVE) gz = hit.location.z;
+        }
+      }
+    } catch (_) {
+      gz = null;
+    }
+    nt.ground.set(id, { gz, at: now, x: pos.x, y: pos.y });
+    return gz;
+  }
+
+  // Marker anchor: the ground under the player plus the configured card
+  // height, with an origin-relative fallback while uncalibrated or airborne.
+  function ntAnchorZ(id, pos, now, budget) {
+    const gz = ntGroundZ(id, pos, now, budget);
+    return gz !== null ? gz + nt.config.height : pos.z + NT_AIR_FALLBACK;
+  }
+
+  function ntScaleFor(dist) {
+    const t = Math.min(1, dist / nt.config.range);
+    return Math.max(0.55, Math.min(1.2, 1.15 - 0.65 * t));
+  }
+
+  function ntPlayerPosition() {
+    try {
+      if (typeof LocalPlayer !== "undefined" && LocalPlayer && typeof LocalPlayer.getPosition === "function") {
+        return LocalPlayer.getPosition();
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+
+  // Camera pose with a fallback. Camera.capture() is not guaranteed to answer
+  // on every build/context (hmp-admin and hmp-quidditch already work around it
+  // through getControlRotation); without a pose this loop would emit empty
+  // frames forever — the overlay would simply never draw. The fallback
+  // synthesizes an eye-level origin from the player transform, which keeps the
+  // remote markers placed sensibly.
+  function ntCameraPose() {
+    let cam = null;
+    try {
+      cam = typeof Camera !== "undefined" && Camera && typeof Camera.capture === "function" ? Camera.capture() : null;
+    } catch (_) {
+      cam = null;
+    }
+    if (cam && cam.position && cam.rotation) return cam;
+    let rot = null;
+    try {
+      if (typeof LocalPlayer !== "undefined" && LocalPlayer && typeof LocalPlayer.getControlRotation === "function") {
+        rot = LocalPlayer.getControlRotation();
+      }
+    } catch (_) {
+      rot = null;
+    }
+    const own = ntPlayerPosition();
+    if (rot && own && Number.isFinite(own.x) && Number.isFinite(Number(rot.yaw))) {
+      return {
+        position: { x: own.x, y: own.y, z: (Number(own.z) || 0) + NT_EYE_HEIGHT },
+        rotation: { yaw: Number(rot.yaw) || 0, pitch: Number(rot.pitch) || 0 },
+        lens: null,
+      };
+    }
+    return null;
+  }
+
+  // The lens fov must be horizontal degrees. Builds that report radians (~1.5
+  // for a 90-degree lens) would project every marker tens of screen-widths
+  // off-screen — all of them culled, nothing ever drawn. A value below 10
+  // cannot be sane degrees, so treat it as radians and convert.
+  function ntFovDegrees(cam) {
+    const lens = cam && cam.lens ? Number(cam.lens.fov) : 0;
+    let fov = lens > 0 ? lens : 90;
+    if (fov < 10) fov = (fov * 180) / Math.PI;
+    return Math.min(170, Math.max(20, fov));
+  }
+
+  // The render loop: project every tracked player to screen space and hand the
+  // page a compact geometry frame. Runs ~60x per second; identity data moves on
+  // the throttled data push, geometry on this one.
+  function ntRenderFrame() {
+    if (nt.view < 0 || !nt.config.enabled) return;
+    const now = Date.now();
+    const screen = ntScreenSize();
+    const rows = [];
+
+    const cam = ntCameraPose();
+    if (!cam || !cam.position || !cam.rotation || screen.w <= 0 || screen.h <= 0) {
+      try {
+        Web.emit(nt.view, "hmp-hud:nametags-frame", { rows });
+      } catch (_) {
+      }
       return;
     }
-    if (voiceLabelState !== null && entityId !== voiceEntityId) clearVoiceLabel();
-    voiceEntityId = entityId;
-    // Voice "working" means enabled AND a microphone actually captured; anything else is red.
-    const working = voice.enabled === true && voice.hasMic !== false;
-    const want = working ? (voice.talking ? "talking" : "on") : "off";
-    if (want === voiceLabelState) return;
-    voiceLabelState = want;
+
+    let yaw = Number(cam.rotation.yaw) || 0;
+    let pitch = Number(cam.rotation.pitch) || 0;
+    if (nt.config.flipYaw) yaw = -yaw;
+    if (nt.config.flipPitch) pitch = -pitch;
+    const cy = Math.cos(yaw * NT_RAD), sy = Math.sin(yaw * NT_RAD);
+    const cp = Math.cos(pitch * NT_RAD), sp = Math.sin(pitch * NT_RAD);
+    // Unreal-style basis: X forward, Y right, Z up, rotations in degrees.
+    const fwd = { x: cp * cy, y: cp * sy, z: sp };
+    const right = { x: -sy, y: cy, z: 0 };
+    const up = { x: -sp * cy, y: -sp * sy, z: cp };
+    const origin = cam.position;
+    const fov = nt.config.fov > 0 ? nt.config.fov : ntFovDegrees(cam);
+    const tanH = Math.tan((fov * 0.5) * NT_RAD);
+    const tanV = (tanH * screen.h) / screen.w;
+
+    const project = (wx, wy, wz) => {
+      const dx = wx - origin.x, dy = wy - origin.y, dz = wz - origin.z;
+      const zc = dx * fwd.x + dy * fwd.y + dz * fwd.z;
+      if (zc < 30) return null;
+      const xc = dx * right.x + dy * right.y + dz * right.z;
+      const yc = dx * up.x + dy * up.y + dz * up.z;
+      const sx = (xc / (zc * tanH) * 0.5 + 0.5) * screen.w;
+      const syp = (0.5 - (yc / (zc * tanV)) * 0.5) * screen.h;
+      return { sx, sy: syp, dist: Math.sqrt(dx * dx + dy * dy + dz * dz) };
+    };
+
+    const marginX = 90, marginY = 140;
+    nt.occCursor = 0;
+    const groundBudget = { used: 0 };
+
+    // Remote players first (interpolated server samples, occlusion-checked).
+    for (const [id, entry] of nt.roster) {
+      const pos = ntInterpolated(entry, now);
+      const head = { x: pos.x, y: pos.y, z: ntAnchorZ(id, pos, now, groundBudget) };
+      const p = project(head.x, head.y, head.z);
+      if (!p || p.sx < -marginX || p.sx > screen.w + marginX || p.sy < -marginY || p.sy > screen.h + marginY) continue;
+      let alpha = ntVisibleAlpha(p.dist);
+      if (alpha > 0 && nt.config.occlusion && ntOccluded(id, origin, head)) alpha = 0;
+      if (alpha <= 0) continue;
+      rows.push([id, p.sx, p.sy, ntScaleFor(p.dist), alpha]);
+    }
+
+    // Own marker: live LocalPlayer position, server identity + health.
+    // The own tag anchors a bit lower than everyone else's (`selfHeight`):
+    // with the third-person camera close behind the head, the full-height
+    // anchor projects above the top of the frame where the cull deleted it —
+    // the own marker never showed in the game's normal view. It is clamped
+    // into the visible frame instead of culled, so it stays readable; in
+    // first person (camera on the body) it is skipped — it would only sit
+    // mid-screen over the crosshair.
+    if (nt.config.showSelf && serverState && Number.isSafeInteger(serverState.playerId)) {
+      const own = ntPlayerPosition();
+      if (own && Number.isFinite(own.x)) {
+        const dxc = own.x - origin.x, dyc = own.y - origin.y;
+        const camDistXy = Math.sqrt(dxc * dxc + dyc * dyc);
+        if (camDistXy > NT_SELF_CAM_DIST) {
+          // The own card may sit lower than everyone else's (selfHeight); the
+          // anchor is still terrain-based, so the origin convention is moot.
+          const baseZ = ntAnchorZ(serverState.playerId, own, now, groundBudget);
+          const anchorZ = Number.isFinite(nt.config.selfHeight) && nt.config.selfHeight > 0
+            ? baseZ - nt.config.height + nt.config.selfHeight
+            : baseZ;
+          const head = { x: own.x, y: own.y, z: anchorZ };
+          const p = project(head.x, head.y, head.z);
+          if (p) {
+            const alpha = ntVisibleAlpha(p.dist);
+            if (alpha > 0) {
+              // Clamp into the visible frame: the own tag must stay readable
+              // even when its anchor leaves the frustum at close zoom.
+              const sx = Math.min(screen.w - 80, Math.max(80, p.sx));
+              const sy = Math.min(screen.h - 180, Math.max(90, p.sy));
+              rows.push([serverState.playerId, sx, sy, ntScaleFor(p.dist), alpha]);
+            }
+          }
+        }
+      }
+    }
+
     try {
-      if (typeof Nametags.setSelfVisible === "function") Nametags.setSelfVisible(true);
-      const color = want === "off" ? VOICE_COLOR_OFF
-        : (want === "talking" ? VOICE_COLOR_TALKING : VOICE_COLOR_ON);
-      Nametags.setLabel(entityId, VOICE_DOT, 0, color);
+      Web.emit(nt.view, "hmp-hud:nametags-frame", { rows });
     } catch (_) {
-      voiceLabelState = null;
     }
   }
+
+  // Client-driven roster tick: the host has no reliable server timers, so the
+  // client asks for the nearby-player snapshot at the configured rate.
+  function ntTick() {
+    if (!nt.config.enabled) return;
+    const now = Date.now();
+    if (now - nt.lastRosterReq >= nt.config.tickMs) {
+      nt.lastRosterReq = now;
+      try {
+        Events.emitServer("hmp-hud:nametags-tick", "{}");
+      } catch (_) {
+      }
+    }
+    ntPushData(false);
+    ntRenderFrame();
+  }
+
+  function ntShow() {
+    if (!nt.config.enabled || !ntSupported()) return;
+    if (ntEnsureView() < 0) return;
+    ntHideEngineNametags();
+    try {
+      Web.showView(nt.view);
+    } catch (_) {
+    }
+    ntPushConfig();
+    ntDirtyAll();
+    ntPushData(true);
+  }
+
+  function ntHide() {
+    if (nt.view >= 0) {
+      try {
+        Web.emit(nt.view, "hmp-hud:nametags-clear", {});
+        Web.hideView(nt.view);
+      } catch (_) {
+      }
+    }
+    nt.roster.clear();
+    nt.occ.clear();
+    nt.ground.clear();
+    nt.dirty.clear();
+    nt.removed.length = 0;
+  }
+
+  function ntStop() {
+    ntHide();
+    ntRestoreEngineNametags();
+    if (nt.view >= 0) {
+      try {
+        Web.destroyView(nt.view);
+      } catch (_) {
+      }
+      nt.view = -1;
+    }
+  }
+
+  Events.on("hmp-hud:nametags-config", (payload) => {
+    ntApplyConfig(objectOf(payload));
+    ntPushConfig();
+  });
+
+  Events.on("hmp-hud:nametags-roster", (payload) => {
+    ntApplyRoster(objectOf(payload));
+  });
+
+  Events.on("hmp-hud:nametags-mark", (payload) => {
+    ntApplyMark(objectOf(payload));
+  });
+
+  // ~60 Hz overlay loop; each iteration throttles the server roster request to
+  // the configured tick rate and pushes at most one geometry + data frame.
+  const ntTimer = setInterval(() => {
+    if (!visible || isSuspended()) return;
+    ntTick();
+  }, 16);
+  if (typeof ntTimer.unref === "function") ntTimer.unref();
 
   // ---------------------------------------------------------------------------
   // Chat: the native chat overlay is hidden (Chat.setUIVisible, the Framework's
@@ -963,7 +1539,8 @@
       voice = { enabled, hasMic, talking };
     }
     if (voice) state.voice = voice;
-    updateVoiceIndicator(state);
+    // The above-name voice dot is gone: the nametag overlay (nt* functions)
+    // reads Voice directly every frame. state.voice stays for the HUD page.
     return state;
   }
 
@@ -985,15 +1562,16 @@
     if (!state) return;
     serverState = state;
     lastPageJson = "";
-    // While another screen owns the display (Floo map), only buffer the state;
-    // resume renders it the moment the overlay hands the screen back.
-    if (suspended) return;
+    // While another screen owns the display (Floo map, hold key, inventory screen),
+    // only buffer the state; resume renders it the moment the screen is back.
+    if (isSuspended()) return;
     if (ensureView() < 0) {
       logger.warn("The HUD web view is not available yet");
       return;
     }
     visible = true;
     Web.showView(view);
+    ntShow();
     suppressGameHud(true);
     // Entering the world: only NOW are the native menu holds + ESC bind applied,
     // so the loading/character/spawn phases run completely untouched.
@@ -1007,7 +1585,7 @@
   });
 
   Events.on("hmp-hud:update", (payload) => {
-    if (suspended) {
+    if (isSuspended()) {
       // Keep the snapshot fresh so resume is instant; render waits for resume.
       const buffered = objectOf(payload);
       if (buffered) {
@@ -1029,7 +1607,7 @@
     serverState = null;
     lastPageJson = "";
     closeMenu();
-    hideVoiceIndicator();
+    ntHide();
     if (view >= 0) {
       try {
         Web.hideView(view);
@@ -1045,28 +1623,41 @@
   // Unlike hmp-hud:hide, the server snapshot survives, so resume is instant and
   // the native game HUD suppression is untouched (no flicker behind overlays).
   // A show/update arriving while suspended only buffers state until resume.
+  // Reasons stack: the map's suspend and the inventory key's hold can be out
+  // at once, and the view returns only when the last reason lets go.
   // ---------------------------------------------------------------------------
-  let suspended = false;
+  const suspendReasons = new Set();
   let suspendedWasVisible = false;
 
-  Events.on("hmp-hud:suspend", () => {
-    if (suspended) return;
-    suspended = true;
-    suspendedWasVisible = visible;
-    if (visible) {
-      visible = false;
-      if (view >= 0) {
-        try {
-          Web.hideView(view);
-        } catch (_) {
-        }
-      }
-    }
-  });
+  function isSuspended() {
+    return suspendReasons.size > 0;
+  }
 
-  Events.on("hmp-hud:resume", () => {
-    if (!suspended) return;
-    suspended = false;
+  function setSuspended(reason, on) {
+    let changed = false;
+    if (on) {
+      if (suspendReasons.has(reason)) return false;
+      const first = suspendReasons.size === 0;
+      suspendReasons.add(reason);
+      if (first) suspendedWasVisible = visible;
+      changed = true;
+    } else {
+      if (!suspendReasons.delete(reason)) return false;
+      changed = true;
+    }
+    if (suspendReasons.size > 0) {
+      if (visible) {
+        visible = false;
+        if (view >= 0) {
+          try {
+            Web.hideView(view);
+          } catch (_) {
+          }
+        }
+        ntHide();
+      }
+      return changed;
+    }
     if (suspendedWasVisible && serverState) {
       visible = true;
       if (view >= 0) {
@@ -1075,74 +1666,134 @@
         } catch (_) {
         }
       }
+      ntShow();
       lastPageJson = "";
       pushToPage();
       pushChatToPage();
     }
     suspendedWasVisible = false;
+    return changed;
+  }
+
+  Events.on("hmp-hud:suspend", () => setSuspended("floo", true));
+  Events.on("hmp-hud:resume", () => setSuspended("floo", false));
+
+  // ---------------------------------------------------------------------------
+  // The inventory screen belongs to hmp-inventory: it owns the page and the
+  // toggle key (its ui.key, default I) and reports open/close, while this
+  // resource only steps the HUD aside while the screen is up — whatever opened
+  // it (/inventory, another resource calling ui.open, or its bound key).
+  Events.on("hmp-inventory:open", () => {
+    setSuspended("inventory", true);
+  });
+  Events.on("hmp-inventory:close", () => {
+    setSuspended("inventory", false);
   });
 
   // ---------------------------------------------------------------------------
-  // TAB -> inventory toggle.
-  // The server owns the configured key; while the inventory page is focused the
-  // Framework swallows key edges, so the forked inventory page (inventory.html)
-  // handles TAB itself and closes via its normal close bridge.
+  // Hold-hide (the item-wheel key). Holding the configured key (default TAB,
+  // the game's own item wheel) steps the HUD aside for exactly as long as it is
+  // held — the release brings the HUD back. The inventory toggle itself is NOT
+  // bound here: hmp-inventory owns it (ui.key, default I), so the two never
+  // race on the same edge. A focused page swallows key edges, so the release
+  // is caught three ways: the key's up edge whenever the game layer sees it, a
+  // poll of the physical key state while the hold is out, and a deadline that
+  // can never leave the HUD hidden on its own.
   // ---------------------------------------------------------------------------
-  let shortcutDisposer = null;
-  let registeredKey = "";
+  let holdDownDisposer = null;
+  let holdUpDisposer = null;
+  let holdTimer = null;
+  let holdKey = "";
 
-  function registerInventoryShortcut(key) {
-    const normalized = String(key || "").trim().toLowerCase();
-    if (!normalized || normalized === registeredKey) return;
-    if (shortcutDisposer) {
+  function holdEnd() {
+    if (holdTimer) {
+      clearInterval(holdTimer);
+      holdTimer = null;
+    }
+    if (setSuspended("key-hold", false)) logger.info("HUD back — hold key released");
+  }
+
+  function holdStart() {
+    const key = holdKey || "tab";
+    if (setSuspended("key-hold", true)) logger.info(`HUD hidden while '${key}' is held`);
+    if (holdTimer) return;
+    const deadline = Date.now() + 8000;
+    holdTimer = setInterval(() => {
+      let down = true;
       try {
-        shortcutDisposer();
+        down = !!Hmp.input.shortcuts.isDown(key);
       } catch (_) {
+        down = true;
       }
-      shortcutDisposer = null;
-      registeredKey = "";
+      if (!down || Date.now() >= deadline) holdEnd();
+    }, 80);
+    if (typeof holdTimer.unref === "function") holdTimer.unref();
+  }
+
+  function disposeHold() {
+    for (const disposer of [holdDownDisposer, holdUpDisposer]) {
+      if (disposer) {
+        try {
+          disposer();
+        } catch (_) {
+        }
+      }
+    }
+    holdDownDisposer = null;
+    holdUpDisposer = null;
+    if (holdTimer) {
+      clearInterval(holdTimer);
+      holdTimer = null;
+    }
+    setSuspended("key-hold", false);
+  }
+
+  function applyHoldKey(key) {
+    const normalized = String(key === undefined || key === null ? "tab" : key).trim().toLowerCase().slice(0, 16);
+    if (normalized === holdKey) return;
+    disposeHold();
+    holdKey = normalized;
+    if (!normalized) {
+      logger.info("Hold-hide disabled (empty hudHoldKey)");
+      return;
     }
     if (!Hmp || !Hmp.input || !Hmp.input.shortcuts) {
-      logger.warn("hmp-lib input shortcuts unavailable: TAB inventory toggle is disabled");
+      logger.warn("hmp-lib input shortcuts unavailable: the HUD hold-hide is disabled");
       return;
     }
     try {
-      shortcutDisposer = Hmp.input.shortcuts.register({
+      holdDownDisposer = Hmp.input.shortcuts.register({
         resource: "cah-hud",
-        id: "toggle-inventory",
+        id: "hud-hold-start",
         key: normalized,
         state: "down",
         priority: 10,
-        handler: () => {
-          try {
-            Events.emitServer("hmp-hud:inventory-toggle", "{}");
-          } catch (_) {
-          }
-        },
+        handler: () => holdStart(),
       });
-      registeredKey = normalized;
-      logger.info(`Inventory toggle bound to '${normalized}'`);
+      // One registration per physical edge, so this can never tie with the
+      // start above. A lower priority means another resource's up edge wins
+      // arbitration; the poll still catches the release either way.
+      holdUpDisposer = Hmp.input.shortcuts.register({
+        resource: "cah-hud",
+        id: "hud-hold-end",
+        key: normalized,
+        state: "up",
+        priority: 9,
+        handler: () => holdEnd(),
+      });
+      logger.info(`Hold-hide bound to '${normalized}' (holding it hides the HUD for the item wheel)`);
     } catch (error) {
-      logger.warn(`Could not bind the inventory toggle to '${normalized}': ${error instanceof Error ? error.message : String(error)}`);
+      logger.warn(`Could not bind the HUD hold-hide to '${normalized}': ${error instanceof Error ? error.message : String(error)}`);
+      holdDownDisposer = null;
+      holdUpDisposer = null;
+      holdKey = "";
     }
   }
-
 
   Events.on("hmp-hud:keybinds", (payload) => {
     const value = objectOf(payload);
     if (!value) return;
-    if (value.inventoryToggle === false) {
-      if (shortcutDisposer) {
-        try {
-          shortcutDisposer();
-        } catch (_) {
-        }
-        shortcutDisposer = null;
-        registeredKey = "";
-      }
-      return;
-    }
-    registerInventoryShortcut(value.inventoryKey);
+    applyHoldKey(value.hudHoldKey);
   });
 
   function announceReady() {
@@ -1154,18 +1805,12 @@
 
   Events.on("resourceStop", (name) => {
     if (name && name !== "cah-hud") return;
-    if (shortcutDisposer) {
-      try {
-        shortcutDisposer();
-      } catch (_) {
-      }
-      shortcutDisposer = null;
-      registeredKey = "";
-    }
     visible = false;
     serverState = null;
+    // After the state is gone the hold's release path cannot re-show anything.
+    disposeHold();
     closeMenu();
-    hideVoiceIndicator();
+    ntStop();
     suppressGameHud(false);
     closeChatInput(false);
     if (chatShortcutDisposer) {

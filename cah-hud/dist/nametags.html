@@ -1,0 +1,344 @@
+<!doctype html>
+<!-- ============================================================================
+     hmp-hud nametag overlay (the marker above every player's head).
+     Full-screen transparent page: pointer-events none, never focused, driven
+     entirely by the client script:
+       client -> page : hmp-hud:nametags-config  (sizes / switches)
+                        hmp-hud:nametags-data    (identity, health, voice, marks)
+                        hmp-hud:nametags-frame   (screen positions, ~60 Hz)
+     Everything the engine nametag could not do lives here: images (house
+     crests), the Cinzel font, per-player voice badges and custom marks. The
+     character name comes from hmp-core - never the Steam/Discord nickname.
+     ========================================================================= -->
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: "Cinzel";
+    src: url("fw://resources/cah-hud/dist/fonts/Cinzel-Variable.ttf") format("truetype");
+    font-weight: 400 900;
+    font-style: normal;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    /* font-size drives the whole card through em units; the client scales it. */
+    font-size: 15px;
+  }
+
+  .nt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 50% 100%;
+    will-change: transform, opacity;
+    opacity: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    transition: opacity .16s linear;
+  }
+
+  .nt-card {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px 4px 6px;
+    border-radius: 9px;
+    background: linear-gradient(rgba(9, 11, 16, .62), rgba(9, 11, 16, .40));
+    border: 1px solid rgba(240, 228, 196, .16);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .38);
+    white-space: nowrap;
+  }
+
+  .nt-crest {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .6));
+  }
+
+  .nt-crest.nt-crest-none { display: none; }
+
+  .nt-name {
+    font-family: "Cinzel", Georgia, "Times New Roman", serif;
+    font-size: 1em;
+    font-weight: 600;
+    letter-spacing: .045em;
+    color: #f3ead8;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .85), 0 0 6px rgba(0, 0, 0, .5);
+  }
+
+  /* House accents tint the name slightly; the crest carries the identity. */
+  .nt[data-house="gryffindor"] .nt-name { color: #ffd9a0; }
+  .nt[data-house="slytherin"]  .nt-name { color: #b8f0cd; }
+  .nt[data-house="ravenclaw"]  .nt-name { color: #b9ccff; }
+  .nt[data-house="hufflepuff"] .nt-name { color: #ffedb0; }
+
+  .nt-voice {
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    flex: 0 0 auto;
+  }
+  .nt-voice svg { width: 11px; height: 11px; display: block; }
+
+  .nt-voice.on {
+    display: flex;
+    border-color: rgba(83, 255, 122, .75);
+    background: rgba(83, 255, 122, .14);
+  }
+  .nt-voice.on svg path { fill: #6dff9a; }
+
+  .nt-voice.talking {
+    display: flex;
+    border-color: #ffffff;
+    background: rgba(255, 255, 255, .22);
+    box-shadow: 0 0 8px rgba(255, 255, 255, .65);
+    animation: nt-pulse .9s ease-in-out infinite alternate;
+  }
+  .nt-voice.talking svg path { fill: #ffffff; }
+
+  .nt-voice.off {
+    display: flex;
+    border-color: rgba(255, 90, 77, .8);
+    background: rgba(255, 90, 77, .16);
+  }
+  .nt-voice.off svg path { fill: #ff7266; }
+
+  @keyframes nt-pulse {
+    from { box-shadow: 0 0 4px rgba(255, 255, 255, .4); }
+    to   { box-shadow: 0 0 12px rgba(255, 255, 255, .95); }
+  }
+
+  .nt-mark {
+    display: none;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: .82em;
+    color: #ff6a5a;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
+  }
+  .nt-mark.on { display: inline; }
+
+  .nt-hp {
+    width: 108px;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(8, 10, 14, .72);
+    border: 1px solid rgba(240, 228, 196, .18);
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .45);
+  }
+
+  .nt-hp-fill {
+    height: 100%;
+    width: 100%;
+    border-radius: 2px;
+    background: #cfd6e0;
+    transition: width .3s ease, background-color .3s ease;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+(() => {
+  "use strict";
+
+  var stage = document.getElementById("stage");
+  var nodes = new Map();          // id -> { root, name, crest, voice, hp, hpFill, mark, sig }
+  var fontScale = 1;
+  var hidden = true;
+
+  var CRESTS = {
+    gryffindor: "fw://resources/cah-hud/dist/crests/gryffindor.png",
+    slytherin: "fw://resources/cah-hud/dist/crests/slytherin.png",
+    ravenclaw: "fw://resources/cah-hud/dist/crests/ravenclaw.png",
+    hufflepuff: "fw://resources/cah-hud/dist/crests/hufflepuff.png",
+  };
+  var ACCENTS = {
+    gryffindor: "#c8372d",
+    slytherin: "#2a9d5c",
+    ravenclaw: "#3b6fd4",
+    hufflepuff: "#e6b23a",
+  };
+
+  var MIC_SVG =
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3.2 3.2 0 0 0 3.2-3.2V6a3.2 3.2 0 1 0-6.4 0v5.8A3.2 3.2 0 0 0 12 15zm5.4-3.2a.9.9 0 0 0-1.8 0 3.6 3.6 0 0 1-7.2 0 .9.9 0 0 0-1.8 0 5.4 5.4 0 0 0 4.5 5.32V19.3h-2a.9.9 0 0 0 0 1.8h5.8a.9.9 0 0 0 0-1.8h-2v-2.18a5.4 5.4 0 0 0 4.5-5.32z"/></svg>';
+
+  function houseOf(value) {
+    var key = String(value || "").toLowerCase();
+    return Object.prototype.hasOwnProperty.call(CRESTS, key) ? key : null;
+  }
+
+  function voiceClass(voice, talking) {
+    if (voice === null || voice === undefined) return null;
+    if (voice === false) return "off";
+    return talking ? "talking" : "on";
+  }
+
+  function signature(d) {
+    return [d.name, d.house || "", d.hp, d.hm, d.voice === null ? "" : (d.voice ? 1 : 0),
+      d.talking ? 1 : 0, (d.marks || []).join(",")].join("|");
+  }
+
+  function build(id) {
+    var root = document.createElement("div");
+    root.className = "nt";
+    root.dataset.id = id;
+
+    var card = document.createElement("div");
+    card.className = "nt-card";
+
+    var crest = document.createElement("img");
+    crest.className = "nt-crest nt-crest-none";
+    crest.alt = "";
+    crest.draggable = false;
+
+    var name = document.createElement("span");
+    name.className = "nt-name";
+
+    var voice = document.createElement("span");
+    voice.className = "nt-voice";
+    voice.innerHTML = MIC_SVG;
+
+    var mark = document.createElement("span");
+    mark.className = "nt-mark";
+
+    card.appendChild(crest);
+    card.appendChild(name);
+    card.appendChild(voice);
+    card.appendChild(mark);
+
+    var hp = document.createElement("div");
+    hp.className = "nt-hp";
+    var hpFill = document.createElement("div");
+    hpFill.className = "nt-hp-fill";
+    hp.appendChild(hpFill);
+
+    root.appendChild(card);
+    root.appendChild(hp);
+    stage.appendChild(root);
+
+    return { root: root, name: name, crest: crest, voice: voice, hp: hp, hpFill: hpFill, mark: mark, sig: "" };
+  }
+
+  function renderData(id, d) {
+    var node = nodes.get(id) || (nodes.set(id, build(id)), nodes.get(id));
+    var house = houseOf(d.house);
+    var sig = signature(d);
+    if (sig === node.sig) return;
+    node.sig = sig;
+
+    node.root.dataset.house = house || "";
+    node.name.textContent = d.name || "";
+    if (house) {
+      node.crest.src = CRESTS[house];
+      node.crest.classList.remove("nt-crest-none");
+    } else {
+      node.crest.removeAttribute("src");
+      node.crest.classList.add("nt-crest-none");
+    }
+
+    var cls = voiceClass(d.voice, d.talking);
+    if (cls) {
+      node.voice.classList.remove("on", "talking", "off");
+      node.voice.classList.add(cls);
+    } else {
+      node.voice.classList.remove("on", "talking", "off");
+    }
+
+    var marks = Array.isArray(d.marks) ? d.marks.filter(Boolean) : [];
+    var markText = marks.join(" ");
+    if (markText) {
+      node.mark.textContent = markText;
+      node.mark.classList.add("on");
+    } else {
+      node.mark.textContent = "";
+      node.mark.classList.remove("on");
+    }
+
+    var hpMax = Number(d.hm) > 0 ? Number(d.hm) : 100;
+    var hp = Number(d.hp);
+    if (Number.isFinite(hp) && hp >= 0) {
+      var pct = Math.max(0, Math.min(1, hp / hpMax));
+      node.hp.style.display = "";
+      node.hpFill.style.width = (pct * 100).toFixed(1) + "%";
+      var accent = ACCENTS[house] || "#cfd6e0";
+      node.hpFill.style.backgroundColor = pct <= 0.25 ? "#ff5a4d" : accent;
+    } else {
+      node.hp.style.display = "none";
+    }
+  }
+
+  function drop(id) {
+    var node = nodes.get(id);
+    if (!node) return;
+    if (node.root.parentNode) node.root.parentNode.removeChild(node.root);
+    nodes.delete(id);
+  }
+
+  window.addEventListener("hmp-hud:nametags-config", function (e) {
+    var cfg = (e && e.detail) || {};
+    if (Number.isFinite(Number(cfg.fontScale)) && Number(cfg.fontScale) > 0) {
+      fontScale = Math.max(0.5, Math.min(2.5, Number(cfg.fontScale)));
+      stage.style.fontSize = (15 * fontScale).toFixed(1) + "px";
+    }
+  });
+
+  window.addEventListener("hmp-hud:nametags-data", function (e) {
+    var payload = (e && e.detail) || {};
+    var upserts = Array.isArray(payload.upserts) ? payload.upserts : [];
+    for (var i = 0; i < upserts.length; i++) renderData(upserts[i].id, upserts[i] || {});
+    var removed = Array.isArray(payload.removed) ? payload.removed : [];
+    for (var j = 0; j < removed.length; j++) drop(removed[j]);
+  });
+
+  // One frame = [[id, sx, sy, scale, alpha], ...]. Rows absent from the frame
+  // fade out but stay mounted so data updates never pop a fresh element in.
+  window.addEventListener("hmp-hud:nametags-frame", function (e) {
+    var rows = (e && e.detail && e.detail.rows) || [];
+    var seen = new Set();
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var id = row[0];
+      var node = nodes.get(id);
+      if (!node) continue;
+      seen.add(id);
+      var sx = row[1], sy = row[2], scale = row[3], alpha = row[4];
+      node.root.style.transform =
+        "translate3d(" + sx.toFixed(1) + "px," + sy.toFixed(1) + "px,0)" +
+        " translate(-50%,-100%) scale(" + scale.toFixed(3) + ")";
+      node.root.style.opacity = String(alpha);
+    }
+    if (!seen.size && hidden) return;
+    nodes.forEach(function (node, id) {
+      if (!seen.has(id)) node.root.style.opacity = "0";
+    });
+    hidden = !seen.size;
+  });
+
+  window.addEventListener("hmp-hud:nametags-clear", function () {
+    nodes.forEach(function (node, id) { node.root.style.opacity = "0"; });
+  });
+})();
+</script>
+</body>
+</html>

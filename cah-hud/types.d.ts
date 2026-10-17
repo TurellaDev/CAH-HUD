@@ -49,12 +49,13 @@ export interface HmpHudConfig {
     inventory?: { enabled?: boolean; metric?: HmpHudInventoryMetric };
     health?: { enabled?: boolean; max?: number };
     xp?: { enabled?: boolean };
-    keybinds?: {
-        /** TAB-style inventory toggle through hmp-lib shortcut arbitration. */
-        inventoryToggle?: boolean;
-        /** Framework Key name, e.g. "tab", "i", "f2". */
-        inventoryKey?: string;
-    };
+    /**
+     * The hold-hide key: holding it steps the HUD aside — the game's item-wheel
+     * key (default "tab"). The inventory toggle itself belongs to hmp-inventory
+     * (its ui.key, default "i") and is never bound here, so the two never race
+     * on the same edge. An empty string disables the hold-hide.
+     */
+    keybinds?: { hudHoldKey?: string };
     /**
      * Chat rendered inside the HUD: the native chat overlay is hidden through
      * Chat.setUIVisible and messages are drawn by the HUD page. openKey focuses
@@ -85,6 +86,47 @@ export interface HmpHudConfig {
     gameHud?: { enabled?: boolean; keepGroups?: string[] };
     /** The /menu layout editor. */
     menu?: { enabled?: boolean; command?: string };
+    /**
+     * The nametag overlay: the marker above every player's head (character
+     * name, house crest, health bar, voice badge) drawn by a dedicated
+     * transparent web view instead of the engine nametag layer, which only
+     * supports engine-font text. While it runs the engine nametags are hidden
+     * (Nametags.setVisible(false)); they are restored when the resource stops.
+     */
+    nametags?: {
+        enabled?: boolean;
+        /** Marker reach in world centimetres (floor 3000 = 30 m, default 12000 = 120 m). */
+        range?: number;
+        /** How often the client asks the server for the nearby roster (ms, default 150). */
+        tickMs?: number;
+        /** Draw this player's own marker (default true). */
+        showSelf?: boolean;
+        /** Hide markers behind walls via camera-channel line traces (default false: a wall must not delete the name). */
+        occlusion?: boolean;
+        /**
+         * Card height above the GROUND, in centimetres (default 185). The card
+         * is terrain-anchored per player through a cached downward line trace,
+         * so the character origin's own height (pelvis vs feet, per build)
+         * never pushes the card off the head. Airborne players (brooms) fall
+         * back to an origin-relative offset until they land.
+         */
+        height?: number;
+        /**
+         * Height of this player's own card above the ground, in centimetres
+         * (default 185, same as `height`). The own card is clamped on-screen
+         * and only drawn while the camera is away from the body (third person).
+         */
+        selfHeight?: number;
+        /** Maximum number of markers drawn, nearest first (default 32). */
+        maxMarkers?: number;
+        /** Card text scale for the Cinzel face (default 1). */
+        fontScale?: number;
+        /** Override the horizontal camera FOV used for projection (0 = engine lens). */
+        fov?: number;
+        /** Projection axis calibration, for engine builds with rotated cameras. */
+        flipYaw?: boolean;
+        flipPitch?: boolean;
+    };
     year?: {
         mode?: HmpHudYearMode;
         metadataKey?: string;
@@ -178,7 +220,7 @@ export interface HmpHudHouseState {
 export interface HmpHudState {
     active: boolean;
     character: { id: number; name: string } | null;
-    /** This client's own player id (used to label its own nametag). */
+    /** This client's own player id (used for the nametag overlay's self marker). */
     playerId: number | null;
     /** The player's saved widget layout (null until they save one in /menu). */
     layout: HmpHudLayout | null;
@@ -197,7 +239,7 @@ export interface HmpHudState {
     xp: { level: number; points: number; start?: number | null; end?: number | null; fraction?: number | null } | null;
     /** Four quick-action spells of the active loadout (client-side native read; null until ready). */
     spells: HmpHudSpell[] | null;
-    /** Voice chat state driving the above-name dot (client-side native read; null when Voice is unavailable). */
+    /** Voice chat state of this client (local native read; kept for the /voz flow and diagnostics). */
     voice: { enabled: boolean; hasMic: boolean | null; talking: boolean } | null;
     year: {
         school?: number;
@@ -228,10 +270,6 @@ export interface HmpHudStatus {
     updateIntervalMs: number;
     world: boolean;
     blips: boolean;
-    keybinds: {
-        inventoryToggle: boolean;
-        inventoryKey: string;
-    };
     gameHud: {
         enabled: boolean;
         keepGroups: string[];

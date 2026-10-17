@@ -413,7 +413,10 @@ if (!__offline) {
       health: { enabled: true, max: 100 },
       xp: { enabled: true },
       nametag: { useCharacterName: true },
-      keybinds: { inventoryToggle: true, inventoryKey: "tab" },
+      nametags: {
+        enabled: true, range: 12000, tickMs: 150, showSelf: true, occlusion: false,
+        height: 185, selfHeight: 185, maxMarkers: 32, fontScale: 1, fov: 0, flipYaw: false, flipPitch: false,
+      },
       chat: { enabled: true, openKey: "enter" },
       gameMenus: { enabled: true, mode: "pause", pages: ["spells"], toolWheel: false, actionScreen: false },
       gameHud: { enabled: true, keepGroups: ["map"] },
@@ -445,8 +448,9 @@ if (!__offline) {
     const health = loaded.health || {};
     const xp = loaded.xp || {};
     const nametag = loaded.nametag || {};
-    const keybinds = loaded.keybinds || {};
+    const nametags = loaded.nametags || loaded.nametag || {};
     const chat = loaded.chat || {};
+    const keybinds = loaded.keybinds || {};
     const gameMenus = loaded.gameMenus || {};
     const gameHud = loaded.gameHud || {};
     const menu = loaded.menu || {};
@@ -485,13 +489,49 @@ if (!__offline) {
       nametag: {
         useCharacterName: nametag.useCharacterName !== false,
       },
-      keybinds: {
-        inventoryToggle: keybinds.inventoryToggle !== false && !!inventoryResource,
-        inventoryKey: String(keybinds.inventoryKey || "tab").trim().toLowerCase().slice(0, 16) || "tab",
+      // The hold-hide key: holding it steps the HUD aside (the game's item
+      // wheel lives on TAB by default). The inventory toggle key belongs to
+      // hmp-inventory (ui.key, default I) and is never bound here, so the two
+      // never race on the same edge.
+      keybinds: { hudHoldKey: "tab" },
+      // The nametag overlay feed: which players get drawn above their heads,
+      // how far the markers reach and how often positions stream. `nametags`
+      // replaces the old dormant `nametag` key (still accepted as an alias).
+      nametags: {
+        enabled: nametags.enabled !== false,
+        // 30 m floor: every player nearby must be named at classroom-wing
+        // distance, whatever a half-tuned config file says.
+        range: clampNumber(nametags.range, 3000, 20000, 12000),
+        tickMs: clampNumber(nametags.tickMs, 60, 2000, 150),
+        showSelf: nametags.showSelf !== false,
+        // Off by default: the marker belongs on top of the player it names —
+        // a wall between viewer and target must not delete the name. Set
+        // `nametags.occlusion: true` to bring the line-trace culling back.
+        occlusion: nametags.occlusion === true,
+        // Height above the GROUND: the card is terrain-anchored per player (a
+        // cached downward line trace), so the character origin's own height
+        // (pelvis vs feet per build) never pushes the card off the head.
+        height: clampNumber(nametags.height, 50, 500, 185),
+        // Own card override; falls back to height when unset.
+        selfHeight: clampNumber(nametags.selfHeight, 50, 500, 185),
+        maxMarkers: Math.trunc(clampNumber(nametags.maxMarkers, 1, 64, 32)),
+        fontScale: clampNumber(nametags.fontScale, 0.5, 2.5, 1),
+        fov: clampNumber(nametags.fov, 0, 179, 0),
+        flipYaw: nametags.flipYaw === true,
+        flipPitch: nametags.flipPitch === true,
       },
       chat: {
         enabled: chat.enabled !== false,
         openKey: String(chat.openKey || "t").trim().toLowerCase().slice(0, 16) || "t",
+      },
+      // The hold-hide key: holding it steps the HUD aside so the game's own
+      // item wheel is unobstructed. The inventory toggle key belongs to
+      // hmp-inventory (ui.key) and is never bound here. An empty string
+      // disables the hold-hide.
+      keybinds: {
+        hudHoldKey: keybinds.hudHoldKey === undefined
+          ? "tab"
+          : String(keybinds.hudHoldKey).trim().toLowerCase().slice(0, 16),
       },
       gameMenus: {
         enabled: gameMenus.enabled !== false,
@@ -554,13 +594,80 @@ if (!__offline) {
     return Number.isFinite(parsed) && parsed >= 1 && parsed <= 1000 ? parsed : null;
   }
 
+  // Reading health on this host: the vitals view (hmp-pvp's `vitals` export,
+  // else the native Pvp.getVitals(id) -> { hp, max }) is the value the PvP
+  // policy arbitrates on and the only source reported whenever health actually
+  // changes — hmp-death reads it through the same chain. The reader is resolved
+  // lazily and retried, so it does not matter whether hmp-pvp finished starting
+  // before this resource. `player.health` is only a last resort: the build may
+  // not expose it to scripts at all, which left every nametag health bar stuck
+  // hidden at full.
+  let ntVitalsReader = null;
+  function ntVitalsView(id) {
+    if (!Number.isSafeInteger(id) || id < 0) return null;
+    if (!ntVitalsReader) {
+      try {
+        const pvp = Imports.get("hmp-pvp");
+        if (pvp && typeof pvp.vitals === "function") ntVitalsReader = (wanted) => pvp.vitals(wanted);
+      } catch (_) {
+        /* not available (yet) */
+      }
+      if (!ntVitalsReader) {
+        try {
+          if (typeof Pvp !== "undefined" && Pvp && typeof Pvp.getVitals === "function") {
+            ntVitalsReader = (wanted) => Pvp.getVitals(wanted);
+          }
+        } catch (_) {
+          /* no native either */
+        }
+      }
+      if (!ntVitalsReader) return null;
+    }
+    try {
+      const view = ntVitalsReader(id);
+      return view !== null && view !== undefined ? view : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntVitalsHp(id) {
+    const view = ntVitalsView(id);
+    if (!view) return null;
+    const hp = Number(typeof view === "object" ? view.hp : view);
+    return Number.isFinite(hp) && hp >= 0 ? Math.round(hp * 10) / 10 : null;
+  }
+
+  function ntVitalsMax(id) {
+    const view = ntVitalsView(id);
+    if (!view || typeof view !== "object") return null;
+    const max = Number(view.max);
+    return Number.isFinite(max) && max > 0 ? Math.round(max * 10) / 10 : null;
+  }
+
   function readHealth(player) {
+    const id = player && player.id;
+    if (Number.isSafeInteger(id)) {
+      const vitals = ntVitalsHp(id);
+      if (vitals !== null) return vitals;
+    }
     try {
       const raw = player.health;
       const value = typeof raw === "number" ? raw : Number(raw);
       if (Number.isFinite(value) && value >= 0) return Math.round(value * 10) / 10;
     } catch (_) {
       // The Framework build may not expose player health to scripts.
+    }
+    return null;
+  }
+
+  // The pawn's real maximum from the same vitals view; the configured
+  // health.max is only a fallback for builds without it.
+  function readHealthMax(player) {
+    const id = player && player.id;
+    if (Number.isSafeInteger(id)) {
+      const max = ntVitalsMax(id);
+      if (max !== null) return max;
     }
     return null;
   }
@@ -1097,6 +1204,273 @@ if (!__offline) {
     void runRefresh(player, entry, new Set(["health"]), { force: true });
   }
 
+  // ---------------------------------------------------------------------------
+  // Nametag overlay feed: everything drawn in the marker above players' heads.
+  // The client drives this (server timers are unreliable in this host): it asks
+  // for a roster snapshot every config.nametags.tickMs while the HUD is up, and
+  // this side answers with the players near it - hmp-core CHARACTER names (never
+  // the Steam/Discord nickname), house, health, voice state and positions.
+  // ---------------------------------------------------------------------------
+  const ntNameCache = new Map();    // playerId -> { name, at }
+  const ntHouseCache = new Map();   // characterId -> { house, at }
+  const ntTalking = new Set();      // player ids currently talking (voice relay)
+  const ntLastSent = new Map();     // viewerId -> Set(targetId) of the last roster
+  const ntLastTick = new Map();     // viewerId -> last tick ms (rate limit)
+  const ntMarks = new Map();        // viewerId -> Map(targetId -> Set(mark))
+  const NT_NAME_TTL_MS = 15000;
+  const NT_HOUSE_TTL_MS = 60000;
+
+  function ntPlayers() {
+    try {
+      if (typeof PlayerManager !== "undefined" && PlayerManager && typeof PlayerManager.getAll === "function") {
+        return PlayerManager.getAll() || [];
+      }
+    } catch (_) {
+    }
+    try {
+      if (Hmp && Hmp.player && typeof Hmp.player.all === "function") return Hmp.player.all() || [];
+    } catch (_) {
+    }
+    return [];
+  }
+
+  function ntLocation(player) {
+    if (!player || typeof player.location !== "function") return null;
+    try {
+      return player.location() || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntCharacterName(player) {
+    const id = player && player.id;
+    if (!Number.isSafeInteger(id)) return null;
+    const now = Date.now();
+    const cached = ntNameCache.get(id);
+    if (cached && now - cached.at < NT_NAME_TTL_MS) return cached.name;
+    let name = null;
+    if (core && core.characters && typeof core.characters.active === "function") {
+      try {
+        const character = core.characters.active(player);
+        if (character && character.name) name = String(character.name).trim().slice(0, 48) || null;
+      } catch (_) {
+      }
+    }
+    // No character (still in selection, for instance): fall back to the platform
+    // nickname rather than drawing an empty card.
+    if (!name) {
+      try {
+        if (player.nickname) name = String(player.nickname).trim().slice(0, 48) || null;
+      } catch (_) {
+      }
+    }
+    ntNameCache.set(id, { name, at: now });
+    return name;
+  }
+
+  function ntHouseFor(characterId) {
+    if (!Number.isSafeInteger(characterId) || !housesResource || !housesResource.membership ||
+        typeof housesResource.membership.get !== "function") return Promise.resolve(null);
+    const now = Date.now();
+    const cached = ntHouseCache.get(characterId);
+    if (cached && now - cached.at < NT_HOUSE_TTL_MS) return Promise.resolve(cached.house);
+    return housesResource.membership.get(characterId).then((membership) => {
+      const house = membership && membership.house ? String(membership.house).toLowerCase().slice(0, 16) : null;
+      ntHouseCache.set(characterId, { house, at: Date.now() });
+      return house;
+    }).catch(() => {
+      const stale = ntHouseCache.get(characterId);
+      return stale ? stale.house : null;
+    });
+  }
+
+  function ntVoiceEnabled(player) {
+    if (typeof Voice === "undefined" || !Voice || typeof Voice.isPlayerVoiceEnabled !== "function") return null;
+    try {
+      return Voice.isPlayerVoiceEnabled(player) === true;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntIsTalking(player) {
+    if (!player || !Number.isSafeInteger(player.id)) return false;
+    if (ntTalking.has(player.id)) return true;
+    if (typeof Voice !== "undefined" && Voice && typeof Voice.isPlayerTalking === "function") {
+      try {
+        return Voice.isPlayerTalking(player) === true;
+      } catch (_) {
+      }
+    }
+    return false;
+  }
+
+  function ntMarksFor(viewerId, targetId) {
+    const perViewer = ntMarks.get(viewerId);
+    if (!perViewer) return [];
+    const set = perViewer.get(targetId);
+    return set ? [...set] : [];
+  }
+
+  async function ntBuildRoster(viewer) {
+    const viewerId = viewer && viewer.id;
+    if (!Number.isSafeInteger(viewerId)) return { upserts: [], removed: [] };
+    const origin = ntLocation(viewer);
+    const now = Date.now();
+    if (!origin || !Number.isFinite(origin.x)) {
+      const previous = ntLastSent.get(viewerId) || new Set();
+      ntLastSent.set(viewerId, new Set());
+      return { upserts: [], removed: [...previous] };
+    }
+    const range = config.nametags.range;
+    const rangeSq = range * range;
+    const candidates = [];
+    for (const other of ntPlayers()) {
+      if (!other || other.connected === false || other.id === viewerId) continue;
+      const world = [other.virtualWorld, viewer.virtualWorld];
+      if (Number.isFinite(Number(world[0])) && Number.isFinite(Number(world[1])) &&
+          Number(world[0]) !== Number(world[1])) continue;
+      const position = ntLocation(other);
+      if (!position || !Number.isFinite(position.x)) continue;
+      const dx = position.x - origin.x, dy = position.y - origin.y, dz = position.z - origin.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq > rangeSq) continue;
+      candidates.push({ player: other, position, distSq });
+    }
+    candidates.sort((left, right) => left.distSq - right.distSq);
+    if (candidates.length > config.nametags.maxMarkers) candidates.length = config.nametags.maxMarkers;
+
+    const upserts = [];
+    const seen = new Set();
+    for (const candidate of candidates) {
+      const target = candidate.player;
+      const name = ntCharacterName(target);
+      if (!name) continue;
+      seen.add(target.id);
+      let house = null;
+      if (core && core.characters && typeof core.characters.active === "function") {
+        try {
+          const character = core.characters.active(target);
+          if (character && character.id) house = await ntHouseFor(character.id);
+        } catch (_) {
+        }
+      }
+      const health = readHealth(target);
+      const healthMax = readHealthMax(target) || (health !== null ? config.health.max : null);
+      const voice = ntVoiceEnabled(target);
+      upserts.push({
+        i: target.id,
+        n: name,
+        h: house || null,
+        hp: health,
+        hm: healthMax,
+        v: voice === null ? null : (voice ? 1 : 0),
+        t: ntIsTalking(target) ? 1 : 0,
+        m: ntMarksFor(viewerId, target.id),
+        x: Math.round(candidate.position.x * 10) / 10,
+        y: Math.round(candidate.position.y * 10) / 10,
+        z: Math.round(candidate.position.z * 10) / 10,
+      });
+    }
+
+    const previous = ntLastSent.get(viewerId) || new Set();
+    const removed = [];
+    for (const id of previous) {
+      if (!seen.has(id)) removed.push(id);
+    }
+    ntLastSent.set(viewerId, seen);
+    return { upserts, removed };
+  }
+
+  Events.onClient("hmp-hud:nametags-tick", (player) => {
+    if (!config.nametags.enabled) return;
+    const viewerId = player && player.id;
+    if (!Number.isSafeInteger(viewerId)) return;
+    if (!tracked.has(viewerId)) return; // no HUD session, no marker feed
+    const now = Date.now();
+    const last = ntLastTick.get(viewerId) || 0;
+    if (now - last < config.nametags.tickMs * 0.75) return; // client-driven rate limit
+    ntLastTick.set(viewerId, now);
+    ntBuildRoster(player).then((roster) => {
+      if (roster.upserts.length || roster.removed.length) send(player, "hmp-hud:nametags-roster", roster);
+    }).catch((error) => {
+      logger.warn(`Nametag roster failed for #${viewerId}: ${messageOf(error)}`);
+    });
+  });
+
+  // Voice relay: the client cannot see who else is talking, so the server
+  // forwards the engine's voice events into the talking set the roster reads.
+  Events.on("playerVoiceStart", (player) => {
+    if (player && Number.isSafeInteger(player.id)) ntTalking.add(player.id);
+  });
+  Events.on("playerVoiceStop", (player) => {
+    if (player && Number.isSafeInteger(player.id)) ntTalking.delete(player.id);
+  });
+
+  // Per-viewer marks: another resource (hmp-schedule curfew breakers) pins a
+  // glyph on a player for one viewer. Relayed at once; re-sent with the roster.
+  Exports.register("setNametagMark", (viewer, targetId, mark, on) => {
+    if (!config.nametags.enabled) return false;
+    const viewerId = viewer && viewer.id;
+    if (!Number.isSafeInteger(viewerId) || !Number.isSafeInteger(Number(targetId))) return false;
+    const clean = String(mark || "").trim().slice(0, 16);
+    if (!clean) return false;
+    const target = Number(targetId);
+    let perViewer = ntMarks.get(viewerId);
+    if (!perViewer) {
+      perViewer = new Map();
+      ntMarks.set(viewerId, perViewer);
+    }
+    let set = perViewer.get(target);
+    if (!set) {
+      set = new Set();
+      perViewer.set(target, set);
+    }
+    if (on === false) {
+      set.delete(clean);
+      if (!set.size) perViewer.delete(target);
+    } else {
+      set.add(clean);
+    }
+    send(viewer, "hmp-hud:nametags-mark", { playerId: target, mark: clean, on: on !== false });
+    return true;
+  });
+
+  function ntPurgePlayer(playerId) {
+    if (!Number.isSafeInteger(playerId)) return;
+    ntNameCache.delete(playerId);
+    ntLastSent.delete(playerId);
+    ntLastTick.delete(playerId);
+    ntMarks.delete(playerId);
+    ntTalking.delete(playerId);
+  }
+
+  function ntConfigForClient() {
+    return {
+      enabled: config.nametags.enabled,
+      range: config.nametags.range,
+      tickMs: config.nametags.tickMs,
+      showSelf: config.nametags.showSelf,
+      occlusion: config.nametags.occlusion,
+      height: config.nametags.height,
+      selfHeight: config.nametags.selfHeight,
+      maxMarkers: config.nametags.maxMarkers,
+      fontScale: config.nametags.fontScale,
+      fov: config.nametags.fov,
+      flipYaw: config.nametags.flipYaw,
+      flipPitch: config.nametags.flipPitch,
+    };
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // The inventory toggle key belongs to hmp-inventory (its ui.key, default I,
+  // bound in its own client and rate-limited there). This resource only binds
+  // the HOLD key that steps the HUD aside for the game's item wheel; its value
+  // reaches the client through hmp-hud:keybinds below.
+  // ---------------------------------------------------------------------------
+
   async function activate(payload) {
     const player = payload && payload.session ? payload.session.player : null;
     if (!player) return;
@@ -1105,6 +1479,10 @@ if (!__offline) {
     const entry = { cache: {}, pushed: "", pending: null, dirtyParts: [], pendingShow: false, playerId: player.id };
     tracked.set(player.id, entry);
     await loadLayout(player);
+    send(player, "hmp-hud:nametags-config", ntConfigForClient());
+    send(player, "hmp-hud:keybinds", {
+      hudHoldKey: config.keybinds.hudHoldKey,
+    });
     await runRefresh(
       player,
       entry,
@@ -1144,6 +1522,14 @@ if (!__offline) {
     if (!payload) return;
     hideFor(payload.player);
     if (payload.player && Number.isSafeInteger(payload.player.id)) tracked.delete(payload.player.id);
+  });
+  // The nametag caches key on live player ids; drop them as sessions end so a
+  // rejoining player never inherits a stale name or mark.
+  Events.on("hmp:character:unloading", (payload) => {
+    if (payload && payload.session && payload.session.player) ntPurgePlayer(payload.session.player.id);
+  });
+  Events.on("hmp:session:ended", (payload) => {
+    if (payload && payload.player) ntPurgePlayer(payload.player.id);
   });
   Events.on("hmp:inventory:changed", (payload) => markDirty(payload && payload.player, ["inventory", "money"]));
   Events.on("hmp:progression:changed", (payload) => markDirty(payload && payload.player, ["xp", "year", "test"]));
@@ -1385,28 +1771,6 @@ if (!__offline) {
   });
 
   // ---------------------------------------------------------------------------
-  // Inventory toggle key (hmp-hud:inventory-toggle from the client TAB shortcut)
-  // ---------------------------------------------------------------------------
-  const toggleLimit = Hmp.rateLimit.create({ limit: 4, windowMs: 2000 });
-
-  Events.onClient("hmp-hud:inventory-toggle", async (player) => {
-    if (!config.keybinds.inventoryToggle || !inventoryResource || !inventoryResource.ui) return;
-    if (!toggleLimit.allow(player && player.id)) return;
-    const session = core && core.sessions ? core.sessions.get(player) : null;
-    if (!session) return;
-    if (!core.characters.active(player)) return; // no inventory without an active character
-    try {
-      if (inventoryResource.ui.isOpen(player)) {
-        inventoryResource.ui.close(player);
-      } else {
-        await inventoryResource.ui.open(player);
-      }
-    } catch (error) {
-      logger.warn(`Inventory toggle failed for #${player && player.id}: ${messageOf(error)}`);
-    }
-  });
-
-  // ---------------------------------------------------------------------------
   // /voz: inspect and change the local voice chat settings (they live
   // client-side, so the command asks the client and relays the answer).
   // ---------------------------------------------------------------------------
@@ -1453,13 +1817,6 @@ if (!__offline) {
   Events.onClient("hmp-hud:client-ready", (player) => {
     try {
       player.emit(
-        "hmp-hud:keybinds",
-        JSON.stringify({
-          inventoryToggle: config.keybinds.inventoryToggle,
-          inventoryKey: config.keybinds.inventoryKey,
-        }),
-      );
-      player.emit(
         "hmp-hud:gamehud",
         JSON.stringify({
           enabled: config.gameHud.enabled,
@@ -1483,6 +1840,7 @@ if (!__offline) {
           actionScreen: config.gameMenus.actionScreen,
         }),
       );
+      player.emit("hmp-hud:nametags-config", JSON.stringify(ntConfigForClient()));
     } catch (_) {
     }
   });
@@ -1508,6 +1866,15 @@ if (!__offline) {
     const entry = entryFor(player && player.id);
     if (entry) entry.houseReadAt = 0;
     markDirty(player, ["house"]);
+    // The overlay marker draws the crest too: drop the cached house so the next
+    // roster tick re-reads the membership.
+    if (core && core.characters && typeof core.characters.active === "function") {
+      try {
+        const character = core.characters.active(player);
+        if (character && character.id) ntHouseCache.delete(character.id);
+      } catch (_) {
+      }
+    }
   });
 
   // ESC card "Horário": ask hmp-schedule to open its guide for this player.
@@ -1565,6 +1932,12 @@ if (!__offline) {
     if (name && name !== "cah-hud") return;
     tracked.clear();
     clearClassBlip();
+    ntNameCache.clear();
+    ntHouseCache.clear();
+    ntTalking.clear();
+    ntLastSent.clear();
+    ntLastTick.clear();
+    ntMarks.clear();
     try {
       if (blipsResource && blipsResource.markers) blipsResource.markers.clear("cah-hud");
     } catch (_) {
@@ -1640,10 +2013,6 @@ if (!__offline) {
     updateIntervalMs: config.updateIntervalMs,
     world: !!worldResource,
     blips: !!blipsResource,
-    keybinds: {
-      inventoryToggle: config.keybinds.inventoryToggle,
-      inventoryKey: config.keybinds.inventoryKey,
-    },
     gameHud: {
       enabled: config.gameHud.enabled,
       keepGroups: config.gameHud.keepGroups.slice(),

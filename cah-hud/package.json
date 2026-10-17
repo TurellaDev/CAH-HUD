@@ -6,8 +6,8 @@
   "mafiahub": {
     "serverScripts": ["dist/server.js"],
     "clientScripts": ["dist/client.js"],
-    "files": ["dist/client.js", "dist/hud.html", "dist/inventory.html", "dist/crests/**"],
-    "exports": ["show", "hide", "refresh", "setYearOverride", "menu", "test", "status"],
+    "files": ["dist/client.js", "dist/hud.html", "dist/nametags.html", "dist/crests/**", "dist/fonts/**"],
+    "exports": ["show", "hide", "refresh", "setYearOverride", "menu", "test", "status", "setNametagMark"],
     "resourceDependencies": [
       { "name": "hmp-lib", "version": "0.8.1" },
       { "name": "hmp-core", "version": "0.8.1" },
