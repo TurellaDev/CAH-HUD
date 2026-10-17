@@ -93,6 +93,12 @@
     .subrow { display: flex; gap: 6px; align-items: baseline; margin-top: 2px; font-size: 9px;
       letter-spacing: .12em; text-transform: uppercase; color: #b39358;
       text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+    .mugglerow { gap: 7px; }
+    .mugglek { color: #9c8f74; letter-spacing: .1em; }
+    #muggleDate { color: #b39358; letter-spacing: .06em; }
+    .muggletime { font-family: Consolas, 'Courier New', monospace; font-size: 11px;
+      letter-spacing: .04em; text-transform: none; color: #d6c9a4;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), var(--txt-outline); }
 
     .statrow { display: flex; justify-content: space-between; align-items: baseline; margin: 4px 0; gap: 14px; }
     .k { font-size: 8px; letter-spacing: .12em; text-transform: uppercase; color: #c9a25a;
@@ -160,6 +166,91 @@
       text-shadow: 0 1px 1px rgba(0, 0, 0, 0.9), var(--txt-outline); }
 
     /* ------------------------------------------------------------------ */
+    /* House crest widget                                                  */
+    /* ------------------------------------------------------------------ */
+    .housepanel { padding: 8px 10px 9px; text-align: center; }
+    .housename { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 5px;
+      color: var(--house-color, #c9a25a);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), var(--txt-outline); }
+    .crestwrap { position: relative; width: 64px; height: 64px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: center; }
+    #houseCrest { max-width: 100%; max-height: 100%; object-fit: contain; display: none;
+      filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.8)); }
+    #houseCrest.on { display: block; }
+    #houseMystery { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; }
+    #houseMystery.on { display: flex; }
+    .mysteryring { position: absolute; inset: -5px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(201, 162, 90, 0.18), rgba(201, 162, 90, 0.05) 55%, transparent 70%);
+      animation: mystpulse 2.8s ease-in-out infinite; }
+    .qm { position: relative; font-family: Georgia, 'Times New Roman', serif; font-size: 34px; line-height: 1;
+      color: #ecd394;
+      text-shadow: 0 0 6px rgba(236, 211, 148, 0.85), 0 0 18px rgba(201, 162, 90, 0.55),
+        0 0 34px rgba(201, 162, 90, 0.35), 0 1px 2px rgba(0, 0, 0, 0.9), var(--txt-outline);
+      animation: qmglow 2.4s ease-in-out infinite; }
+    .dust { position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; border-radius: 50%;
+      background: radial-gradient(circle, #fff3c9, rgba(201, 162, 90, 0.85) 45%, transparent 72%);
+      box-shadow: 0 0 5px 1px rgba(236, 211, 148, 0.7); pointer-events: none;
+      animation: dustorbit 5.2s linear infinite; }
+    .dust.d2 { width: 2px; height: 2px; animation: dustorbit2 6.8s linear infinite; animation-delay: -1.4s; }
+    .dust.d3 { width: 4px; height: 4px; animation-duration: 4.4s; animation-delay: -2.6s; }
+    .dust.d4 { width: 2px; height: 2px; animation: dustorbit2 7.6s linear infinite; animation-delay: -3.8s; }
+    .dust.d5 { width: 3px; height: 3px; animation-duration: 5.9s; animation-delay: -0.9s; }
+    .dust.d6 { width: 2px; height: 2px; animation: dustorbit2 8.4s linear infinite; animation-delay: -5.1s; }
+    @keyframes mystpulse { 0%, 100% { opacity: 0.55; transform: scale(0.96); } 50% { opacity: 1; transform: scale(1.05); } }
+    @keyframes qmglow {
+      0%, 100% { opacity: 0.9; text-shadow: 0 0 6px rgba(236, 211, 148, 0.85), 0 0 18px rgba(201, 162, 90, 0.55), 0 0 34px rgba(201, 162, 90, 0.35), 0 1px 2px rgba(0, 0, 0, 0.9); }
+      50% { opacity: 1; text-shadow: 0 0 9px rgba(236, 211, 148, 1), 0 0 26px rgba(201, 162, 90, 0.8), 0 0 52px rgba(201, 162, 90, 0.5), 0 1px 2px rgba(0, 0, 0, 0.9); }
+    }
+    @keyframes dustorbit {
+      from { transform: rotate(0turn) translateX(31px) rotate(0turn); opacity: 0.2; }
+      50% { opacity: 0.95; }
+      to { transform: rotate(1turn) translateX(31px) rotate(-1turn); opacity: 0.2; }
+    }
+    @keyframes dustorbit2 {
+      from { transform: rotate(0turn) translateX(22px) rotate(0turn); opacity: 0.18; }
+      50% { opacity: 0.9; }
+      to { transform: rotate(1turn) translateX(22px) rotate(-1turn); opacity: 0.18; }
+    }
+
+    /* Resize handle (visible only in the /menu editor) */
+    .widget .rz { display: none; position: absolute; right: -5px; bottom: -5px; width: 15px; height: 15px;
+      cursor: nwse-resize; z-index: 60;
+      background:
+        radial-gradient(circle at 3px 3px, rgba(236, 211, 148, 0.95), rgba(201, 162, 90, 0.5) 40%, transparent 60%),
+        linear-gradient(135deg, transparent 0 42%, rgba(236, 211, 148, 0.9) 42% 50%, transparent 50% 62%, rgba(236, 211, 148, 0.65) 62% 70%, transparent 70%);
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
+    body.editing .widget .rz { display: block; }
+    body.editing .widget.resizing { cursor: nwse-resize; }
+
+    /* ------------------------------------------------------------------ */
+    /* ESC menu card                                                       */
+    /* ------------------------------------------------------------------ */
+    #escmenu { position: fixed; inset: 0; display: none; z-index: 90; align-items: center; justify-content: center;
+      background: radial-gradient(ellipse at center, rgba(4, 3, 2, 0.35), rgba(2, 1, 1, 0.72)); }
+    #escmenu.on { display: flex; }
+    body.escmenu #hud-root, body.escmenu #w-chat { opacity: 0 !important; pointer-events: none !important; }
+    .escard { width: 300px; padding: 18px 22px 14px; text-align: center;
+      background: linear-gradient(180deg, rgba(24, 18, 10, 0.96), rgba(12, 9, 5, 0.96));
+      border: 1px solid rgba(201, 162, 90, 0.75); border-radius: 3px;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85), 0 0 26px rgba(0, 0, 0, 0.75),
+        inset 0 1px 0 rgba(232, 207, 143, 0.18), inset 0 0 40px rgba(201, 162, 90, 0.07); }
+    .esctitle { font-family: Georgia, 'Times New Roman', serif; font-size: 19px; letter-spacing: .14em;
+      text-transform: uppercase; color: #ecd394;
+      text-shadow: 0 0 12px rgba(201, 162, 90, 0.45), 0 1px 2px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+    .escsub { font-size: 9px; letter-spacing: .3em; text-transform: uppercase; color: #8a7b5f; margin: 3px 0 14px; }
+    .escbtns { display: flex; flex-direction: column; gap: 8px; }
+    .escbtns button { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; letter-spacing: .06em;
+      color: #f0dfa9; padding: 9px 10px; cursor: pointer; border-radius: 2px;
+      border: 1px solid rgba(201, 162, 90, 0.55);
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.16), rgba(201, 162, 90, 0.04));
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.5), inset 0 -1px 0 rgba(232, 207, 143, 0.12);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), var(--txt-outline); }
+    .escbtns button:hover { border-color: rgba(236, 211, 148, 0.9); color: #fff3d6;
+      background: linear-gradient(180deg, rgba(201, 162, 90, 0.3), rgba(201, 162, 90, 0.1));
+      box-shadow: 0 0 14px rgba(201, 162, 90, 0.25), inset 0 1px 0 rgba(0, 0, 0, 0.5); }
+    .eschint { margin-top: 12px; font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: #8a7b5f; }
+
+    /* ------------------------------------------------------------------ */
     /* Layout editor (/menu)                                              */
     /* ------------------------------------------------------------------ */
     #editor { position: fixed; inset: 0; display: none; z-index: 100; pointer-events: none; }
@@ -225,10 +316,8 @@
     /* Chat: rendered inside the HUD (the native overlay is hidden).      */
     /* ------------------------------------------------------------------ */
     .chatpanel { min-width: 0; width: 330px; padding: 0; }
-    #chat { display: flex; flex-direction: column; gap: 2px; pointer-events: none; }
-    body.chat-open #w-chat { pointer-events: auto; }
-    #chatTabs { display: none; gap: 4px; margin-bottom: 2px; }
-    body.chat-open #chatTabs, body.editing #chatTabs { display: flex; }
+    #chat { display: flex; flex-direction: column; gap: 2px; }
+    #chatTabs { display: flex; gap: 4px; margin-bottom: 2px; pointer-events: auto; }
     #chatTabs button { font-family: Georgia, 'Times New Roman', serif; font-size: 9px;
       letter-spacing: .08em; text-transform: uppercase; color: #b3a07a; cursor: pointer;
       background: rgba(8, 6, 4, 0.6); border: 1px solid rgba(201, 162, 90, 0.4);
@@ -247,9 +336,10 @@
     .chat-line[data-channel="system"] .chat-tag { color: #9c8f74; }
     .chat-line[data-channel="local"] .chat-tag { color: #8fbf7f; }
     .chat-line[data-channel="ooc"] .chat-tag { color: #7fb8e8; }
+    .chat-line[data-channel="admin"] .chat-tag { color: #c98cff; }
+    .chat-line[data-channel="console"] .chat-tag { color: #ffd75e; }
     .chat-line.stale { opacity: 0; }
-    body.chat-open .chat-line { opacity: 1; }
-    body.chat-open .chat-line:nth-last-child(n+8) { opacity: 0.35; }
+    .chat-line:nth-last-child(n+8) { opacity: 0.35; }
     #chatInputRow { display: none; pointer-events: auto; margin-top: 3px; }
     body.chat-open #chatInputRow { display: block; }
     #chatInput { width: 100%; box-sizing: border-box; background: rgba(8, 6, 4, 0.85);
@@ -278,6 +368,11 @@
           <span class="weather" id="weather"></span>
         </div>
         <div class="subrow"><span id="season"></span></div>
+        <div class="subrow mugglerow">
+          <span class="mugglek">Mundo Muggle</span>
+          <span id="muggleDate"></span>
+          <span class="muggletime" id="muggleClock"></span>
+        </div>
       </div>
     </div>
 
@@ -322,6 +417,25 @@
         <div class="spellnames" id="spellnames"><span></span><span></span><span></span><span></span></div>
       </div>
     </div>
+
+    <div class="widget" id="w-house" data-widget="house">
+      <div class="wpanel housepanel">
+        <div class="housename" id="houseName">Casa</div>
+        <div class="crestwrap">
+          <img id="houseCrest" alt="" draggable="false" />
+          <div id="houseMystery">
+            <div class="mysteryring"></div>
+            <span class="qm">?</span>
+            <span class="dust"></span>
+            <span class="dust d2"></span>
+            <span class="dust d3"></span>
+            <span class="dust d4"></span>
+            <span class="dust d5"></span>
+            <span class="dust d6"></span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="widget" id="w-chat" data-widget="chat">
@@ -342,10 +456,24 @@
     </div>
   </div>
 
+  <div id="escmenu">
+    <div class="escard">
+      <div class="esctitle">Hogwarts</div>
+      <div class="escsub">Menu</div>
+      <div class="escbtns">
+        <button id="escSettings">Defini&ccedil;&otilde;es</button>
+        <button id="escSchedule">Hor&aacute;rio</button>
+        <button id="escEditor">Editor do HUD</button>
+        <button id="escClose">Fechar</button>
+      </div>
+      <div class="eschint">ESC fecha</div>
+    </div>
+  </div>
+
   <div id="editor">
     <div id="edGrid"></div>
     <div class="edbar">
-      <div class="edtitle">Editor do HUD<span class="edhint">arrasta os widgets para os moveres</span></div>
+      <div class="edtitle">Editor do HUD<span class="edhint">arrasta para mover &middot; canto inferior direito para redimensionar</span></div>
       <div class="edactions">
         <button id="edReset" title="Voltar ao layout predefinido">Repor</button>
         <button id="edImport" title="Importar um layout a partir de JSON">Importar</button>
@@ -392,7 +520,7 @@
       };
       var SEASON_PT = { spring: "Primavera", summer: "Ver\u00e3o", autumn: "Outono", winter: "Inverno" };
 
-      var WIDGET_KEYS = ["world", "year", "stats", "vitals", "progress", "classes", "spells", "chat"];
+      var WIDGET_KEYS = ["world", "year", "stats", "vitals", "progress", "classes", "spells", "house", "chat"];
       var DEFAULT_LAYOUT = {
         version: 1,
         widgets: {
@@ -403,6 +531,7 @@
           progress: { x: 16.5, y: 88.5, centerX: false },
           classes: { x: 5, y: 10, centerX: false },
           spells: { x: 84, y: 84, centerX: false },
+          house: { x: 5.5, y: 25, centerX: false },
           chat: { x: 1, y: 40, centerX: false }
         }
       };
@@ -425,6 +554,11 @@
         if (!isFinite(parsed)) return null;
         return Math.round(Math.min(100, Math.max(0, parsed)) * 2) / 2;
       }
+      function clampScale(value) {
+        var n = Number(value);
+        if (!isFinite(n) || n <= 0) return 1;
+        return Math.round(Math.min(2.6, Math.max(0.4, n)) * 20) / 20;
+      }
 
       // -----------------------------------------------------------------
       // Layout handling
@@ -432,6 +566,7 @@
       var currentLayout = clone(DEFAULT_LAYOUT);
       var editing = false;
       var drag = null;
+      var resize = null;
 
       function normalizeLayout(raw) {
         var out = { version: 1, widgets: {} };
@@ -441,7 +576,7 @@
           var x = pos ? clampPercent(pos.x) : null;
           var y = pos ? clampPercent(pos.y) : null;
           if (x === null || y === null) { out.widgets[key] = clone(DEFAULT_LAYOUT.widgets[key]); return; }
-          out.widgets[key] = { x: x, y: y, centerX: !!pos.centerX };
+          out.widgets[key] = { x: x, y: y, centerX: !!pos.centerX, scale: clampScale(pos.scale) };
         });
         return out;
       }
@@ -461,10 +596,17 @@
       function setWidgetPos(key, pos) {
         var node = el('w-' + key);
         if (!node) return;
-        currentLayout.widgets[key] = { x: pos.x, y: pos.y, centerX: !!pos.centerX };
+        currentLayout.widgets[key] = { x: pos.x, y: pos.y, centerX: !!pos.centerX, scale: clampScale(pos.scale) };
+        var stored = currentLayout.widgets[key];
         if (pos.centerX) { node.style.left = '50%'; node.classList.add('centered'); }
         else { node.style.left = pos.x + '%'; node.classList.remove('centered'); }
         node.style.top = pos.y + '%';
+        if (stored.scale && stored.scale !== 1) {
+          node.style.transformOrigin = pos.centerX ? 'top center' : 'top left';
+          node.style.transform = (pos.centerX ? 'translateX(-50%) ' : '') + 'scale(' + stored.scale + ')';
+        } else {
+          node.style.transform = '';
+        }
       }
       function applyLayout() {
         WIDGET_KEYS.forEach(function (key) {
@@ -504,16 +646,34 @@
 
       function renderWorld(world) {
         var widget = el('w-world');
-        if (!world) { setOff(widget, true); return; }
+        // The panel stays visible because it also carries the Muggle (real-world)
+        // clock; the in-game parts are simply blanked when world data is missing.
         setOff(widget, false);
-        el('clock').textContent = world.time || '--:--';
-        var raw = String(world.weather || '').toLowerCase();
-        var icon = WEATHER_ICONS[raw] || '\u2726';
-        el('weather').textContent = icon + ' ' + (WEATHER_PT[raw] || world.weather || '');
-        var season = world.season ? (SEASON_PT[String(world.season).toLowerCase()] || world.season) : '';
+        if (world) {
+          el('clock').textContent = world.time || '--:--';
+          var raw = String(world.weather || '').toLowerCase();
+          var icon = WEATHER_ICONS[raw] || '\u2726';
+          el('weather').textContent = icon + ' ' + (WEATHER_PT[raw] || world.weather || '');
+        } else {
+          el('clock').textContent = '--:--';
+          el('weather').textContent = '';
+        }
+        var season = world && world.season ? (SEASON_PT[String(world.season).toLowerCase()] || world.season) : '';
         el('season').textContent = season;
         setOff(el('season'), !season);
       }
+
+      // Muggle (real-world) clock: driven by the system time, ticking to the second.
+      function pad2(n) { return (n < 10 ? '0' : '') + n; }
+      function tickMuggle() {
+        var d = new Date();
+        var dateEl = el('muggleDate');
+        var timeEl = el('muggleClock');
+        if (dateEl) dateEl.textContent = pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + d.getFullYear();
+        if (timeEl) timeEl.textContent = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+      }
+      tickMuggle();
+      setInterval(tickMuggle, 1000);
 
       function renderStats(data) {
         var money = data.money;
@@ -594,8 +754,46 @@
       }
 
       // -----------------------------------------------------------------
+      // House crest: the player's house (hmp-houses) with its crest, or a
+      // glowing mystery "?" orbited by magic dust while they are unsorted.
+      // -----------------------------------------------------------------
+      var HOUSE_NAMES = { gryffindor: "Gryffindor", hufflepuff: "Hufflepuff", ravenclaw: "Ravenclaw", slytherin: "Slytherin" };
+      var HOUSE_ACCENT = { gryffindor: "#e0b34d", hufflepuff: "#e8c85a", ravenclaw: "#7fc4d8", slytherin: "#9fd8a0" };
+      function crestUrl(key) { return 'fw://resources/cah-hud/dist/crests/' + key + '.png'; }
+      function renderHouse(data) {
+        var widget = el('w-house');
+        // The server pushes state.house = { house: "gryffindor" }; a bare string is
+        // accepted too, so "Gryffindor"/pt-PT spellings still resolve.
+        var value = data && typeof data === 'object' ? (data.house || data.key || data.id || data.name) : data;
+        var key = String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+        var known = HOUSE_NAMES[key];
+        var crest = el('houseCrest');
+        var mystery = el('houseMystery');
+        var name = el('houseName');
+        // #houseCrest / #houseMystery only display with the "on" class (see the CSS).
+        if (known) {
+          setOff(widget, false);
+          crest.classList.add('on');
+          mystery.classList.remove('on');
+          if (!crest.dataset.house || crest.dataset.house !== key) {
+            crest.dataset.house = key;
+            crest.src = crestUrl(key);
+          }
+          name.textContent = known;
+          widget.style.setProperty('--house-color', HOUSE_ACCENT[key] || '#c9a25a');
+        } else {
+          setOff(widget, false);
+          crest.classList.remove('on');
+          mystery.classList.add('on');
+          crest.dataset.house = '';
+          name.textContent = 'Sem Casa';
+          widget.style.setProperty('--house-color', '#c9a25a');
+        }
+      }
+
+      // -----------------------------------------------------------------
       // Spell flames: four candle flames made purely of additive glow dots.
-      // One canvas, pooled particles, pre-rendered tint sprites, ~30 fps cap
+      // One canvas, pooled particles, pre-rendered tint sprites, ~60 fps cap
       // and the loop fully stops whenever the HUD is hidden or the tab hidden.
       // Each spell owns its colour (curated map, else a stable name hash), so
       // the same spell burns the same colour wherever it is equipped.
@@ -765,7 +963,7 @@
         var dt = Math.min(0.12, (ts - flame.last) / 1000);
         flame.last = ts;
         flame.acc += dt;
-        if (flame.acc >= 1 / 30) {
+        if (flame.acc >= 1 / 60) {
           stepFlames(flame.acc);
           drawFlames();
           flame.acc = 0;
@@ -822,6 +1020,7 @@
         renderProgress(state.xp);
         renderClasses(state.classes);
         renderSpells(state.spells);
+        renderHouse(state.house);
       }
 
       // -----------------------------------------------------------------
@@ -841,13 +1040,24 @@
         document.body.classList.toggle('editing', editing);
         closeModal();
         if (editing) {
+          // One resize handle per widget (created once, reused every session).
+          WIDGET_KEYS.forEach(function (key) {
+            var node = el('w-' + key);
+            if (node && !node.querySelector(':scope > .rz')) {
+              var handle = document.createElement('div');
+              handle.className = 'rz';
+              handle.title = 'Arrasta para redimensionar';
+              node.appendChild(handle);
+            }
+          });
           if (layout) { currentLayout = normalizeLayout(layout); persistLocal(); }
           applyLayout();
           el('hud-root').classList.add('show');
           renderSpells(null); // placeholder flames so the widget is visible while arranging
-          toast('Arrasta os widgets para os moveres.');
+          toast('Arrasta para mover \u00b7 canto inferior direito para redimensionar.');
         } else {
           drag = null;
+          resize = null;
         }
       }
 
@@ -947,6 +1157,16 @@
         if (!node) return;
         var key = node.dataset ? node.dataset.widget : null;
         if (!key) return;
+        if (ev.target.closest && ev.target.closest('.rz')) {
+          var rect = node.getBoundingClientRect();
+          var cur = currentLayout.widgets[key] || { scale: 1 };
+          var startScale = Number(cur.scale) > 0 ? Number(cur.scale) : 1;
+          resize = { key: key, node: node, left: rect.left, top: rect.top,
+                     base: Math.max(8, Math.hypot(rect.width, rect.height)), startScale: startScale };
+          node.classList.add('resizing');
+          ev.preventDefault();
+          return;
+        }
         var rect = node.getBoundingClientRect();
         drag = { key: key, node: node, dx: ev.clientX - rect.left, dy: ev.clientY - rect.top,
                  w: rect.width, h: rect.height };
@@ -954,6 +1174,13 @@
         ev.preventDefault();
       });
       document.addEventListener('mousemove', function (ev) {
+        if (resize) {
+          var dist = Math.hypot(ev.clientX - resize.left, ev.clientY - resize.top);
+          var cur = currentLayout.widgets[resize.key] || {};
+          var scale = clampScale(resize.startScale * (dist / resize.base));
+          setWidgetPos(resize.key, { x: cur.x, y: cur.y, centerX: cur.centerX, scale: scale });
+          return;
+        }
         if (!drag) return;
         var x = ev.clientX - drag.dx;
         var y = ev.clientY - drag.dy;
@@ -967,9 +1194,54 @@
         });
       });
       document.addEventListener('mouseup', function () {
+        if (resize) { resize.node.classList.remove('resizing'); resize = null; return; }
         if (!drag) return;
         drag.node.classList.remove('dragging');
         drag = null;
+      });
+
+      // -----------------------------------------------------------------
+      // ESC menu card (Definições / Horário / Editor do HUD)
+      // -----------------------------------------------------------------
+      var escOpen = false;
+      var escOpenedAt = 0;
+      function setEscMenu(on) {
+        escOpen = !!on;
+        if (escOpen) escOpenedAt = Date.now();
+        el('escmenu').classList.toggle('on', escOpen);
+        document.body.classList.toggle('escmenu', escOpen);
+        if (escOpen) closeModal();
+      }
+      window.addEventListener('hmp-hud:escmenu', function (e) {
+        var detail = e.detail || {};
+        setEscMenu(detail.open !== false);
+      });
+      el('escSettings').addEventListener('click', function () {
+        setEscMenu(false);
+        callNative('hmp-hud:esc-settings', '{}');
+      });
+      el('escSchedule').addEventListener('click', function () {
+        setEscMenu(false);
+        callNative('hmp-hud:esc-schedule', '{}');
+      });
+      el('escEditor').addEventListener('click', function () {
+        setEscMenu(false);
+        callNative('hmp-hud:esc-editor', '{}');
+      });
+      el('escClose').addEventListener('click', function () {
+        setEscMenu(false);
+        callNative('hmp-hud:esc-close', '{}');
+      });
+      document.addEventListener('keydown', function (ev) {
+        if (!escOpen) return;
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          // Ignore the echo of the keypress that opened the card: the view takes
+          // focus during that press and CEF re-delivers its keydown here.
+          if (Date.now() - escOpenedAt < 300) return;
+          setEscMenu(false);
+          callNative('hmp-hud:esc-close', '{}');
+        }
       });
 
       // -----------------------------------------------------------------
@@ -1000,10 +1272,12 @@
       var chatLog = el('chatLog');
       var chatInputEl = el('chatInput');
       var chatFilter = 'all';
-      var CHANNEL_TAGS = { system: 'SIS', local: 'LOC', ooc: 'OOC' };
+      var CHANNEL_TAGS = { system: 'SIS', local: 'LOC', ooc: 'OOC', admin: 'ADM', console: 'CON' };
       function chatChannelOf(entry) {
         var text = String(entry.text || '');
         var author = String(entry.author || '');
+        var channel = String(entry.channel || '');
+        if (channel === 'admin' || channel === 'console') return channel;
         if (!author || text.charAt(0) === '[') return 'system';
         if (/^\(\(/.test(text) || /\)\)\s*$/.test(text) || /^\[OOC\]/i.test(text)) return 'ooc';
         return 'local';
@@ -1045,6 +1319,14 @@
       window.addEventListener('hmp-hud:chat', function (e) {
         renderChat(e.detail && e.detail.messages);
       });
+      // Admin log messages from server
+      window.addEventListener('hmp-hud:admin-log', function (e) {
+        var entry = e.detail && e.detail.entry;
+        if (entry) {
+          var messages = [{ author: entry.author || 'Server', text: entry.text, channel: entry.channel || 'admin' }];
+          renderChat(messages);
+        }
+      });
       window.addEventListener('hmp-hud:chat-open', function () {
         document.body.classList.add('chat-open');
         setTimeout(function () { try { chatInputEl.focus(); } catch (e) { } }, 30);
@@ -1062,6 +1344,11 @@
               b.classList.toggle('on', b === btn);
             });
             applyChatFilter();
+            // Clicking a tab opens the chat so filtered messages are visible
+            if (!document.body.classList.contains('chat-open')) {
+              document.body.classList.add('chat-open');
+              setTimeout(function () { try { chatInputEl.focus(); } catch (e) { } }, 30);
+            }
           });
         });
       }

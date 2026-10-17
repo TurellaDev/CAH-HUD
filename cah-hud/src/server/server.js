@@ -1,4 +1,232 @@
 "use strict";
+// ============================================================================
+// Offline harness - runs only when this file is executed directly with node:
+//     node resources/cah-hud/dist/server.js
+// The resource loader never takes this branch (require.main !== module), and
+// harness mode skips the resource body below so the suite can load fresh,
+// mocked copies of this file instead.
+// ============================================================================
+const __offline = typeof require !== "undefined" && typeof module !== "undefined" && require.main === module;
+if (__offline) {
+/**
+ * Offline harness for the cah-hud money source.
+ *
+ * The HUD used to read the hmp-banking account balance while every shop - the
+ * wardrobe, Pippins, Spintwitches - charged native:galleons, so selling a cloak
+ * moved money the player never saw move. This extracts the shipped readMoney()
+ * out of dist/server.js and drives it, so it asserts the real logic rather than
+ * a copy of it that could drift.
+ */
+
+const fs = require("fs");
+const path = require("path");
+
+const SERVER_JS = __filename;
+const HUD_CONFIG = path.join(__dirname, "..", "..", "..", "data", "hmp-hud.json");
+
+let failures = 0;
+const check = (label, ok, extra = "") => {
+  console.log(`  ${ok ? "ok  " : "FAIL"} ${label}${!ok && extra ? ` -- ${extra}` : ""}`);
+  if (!ok) failures++;
+};
+
+/** Pull `async function readMoney(...)` out of the bundle, braces balanced. */
+function extractReadMoney(source) {
+  const start = source.indexOf("async function readMoney(");
+  if (start < 0) throw new Error("readMoney() is missing from dist/server.js");
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error("readMoney() has unbalanced braces");
+}
+
+function buildReadMoney(source, config, { inventory, banking }) {
+  const logger = { warn() {}, info() {}, error() {} };
+  const messageOf = (error) => (error instanceof Error ? error.message : String(error));
+  const factory = new Function(
+    "config",
+    "inventoryResource",
+    "bankingResource",
+    "logger",
+    "messageOf",
+    `${extractReadMoney(source)}\nreturn readMoney;`,
+  );
+  return factory(
+    { money: config },
+    inventory
+      ? { inventory: { count: async (player, item) => inventory(player, item) } }
+      : null,
+    banking
+      ? { accounts: { personal: async (player, currency) => banking(player, currency) } }
+      : null,
+    logger,
+    messageOf,
+  );
+}
+
+/** The economy charges native:galleons, so that is the number that must show. */
+const __fullSource = fs.readFileSync(SERVER_JS, "utf8");
+  const __cut = __fullSource.indexOf("// ======== resource body (the host loads this;" + " harness mode skips it) ========");
+  const source = __cut < 0 ? __fullSource : __fullSource.slice(__cut);
+const player = { id: 6 };
+
+async function main() {
+console.log("cah-hud money source\n");
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check(
+    "auto reads the in-game wallet the shops actually charge",
+    amount === 250,
+    `expected 250, got ${amount}`,
+  );
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("native pins the wallet", amount === 250, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "bank", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: async (p, currency) => {
+      if (currency !== "galleons") throw new Error(`unexpected currency '${currency}'`);
+      return { balance: 9000 };
+    },
+  });
+  const amount = await readMoney(player);
+  check("bank still reads the hmp-banking account", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 0,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("an empty wallet reads as 0, not as a fallback", amount === 0, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 12.9,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("fractional counts are truncated", amount === 12, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => -5,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("a negative count is clamped to 0", amount === 0, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "native", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => {
+      throw new Error("native inventory unavailable");
+    },
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("native hides money when its source is broken", amount === null, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => {
+      throw new Error("hmp-inventory is restarting");
+    },
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("auto degrades to the bank when the wallet is unavailable", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "auto", item: "native:galleons", currency: "galleons" }, {
+    inventory: null,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("auto uses the bank when hmp-inventory is absent", amount === 9000, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "bank", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: Number.NaN }),
+  });
+  const amount = await readMoney(player);
+  check("a non-finite bank balance hides money instead of showing NaN", amount === null, `got ${amount}`);
+}
+
+{
+  const readMoney = buildReadMoney(source, { source: "nonsense", item: "native:galleons", currency: "galleons" }, {
+    inventory: () => 250,
+    banking: () => ({ balance: 9000 }),
+  });
+  const amount = await readMoney(player);
+  check("an unrecognised source degrades to the bank rather than blanking", amount === 9000, `got ${amount}`);
+  check(
+    "the config layer whitelists money.source, so readMoney only ever sees known values",
+    source.includes('"native", "bank", "auto"'),
+  );
+}
+
+// --- the shipped config has to agree with the code above
+{
+  const shipped = JSON.parse(fs.readFileSync(HUD_CONFIG, "utf8"));
+  check(
+    "data/hmp-hud.json money.source is a value readMoney understands",
+    ["native", "bank", "auto"].includes(String(shipped.money && shipped.money.source)),
+    String(shipped.money && shipped.money.source),
+  );
+  check(
+    "data/hmp-hud.json points at the item the shops charge",
+    String((shipped.money && shipped.money.item) || "") === "native:galleons",
+    String(shipped.money && shipped.money.item),
+  );
+  check(
+    "the HUD still refreshes money when the wallet changes",
+    source.includes('markDirty(payload && payload.player, ["inventory", "money"])'),
+  );
+  check("money no longer requires hmp-banking to be installed", !source.includes("config.money.enabled && !!bankingResource"));
+}
+
+console.log("");
+if (failures === 0) {
+  console.log("All hud money checks passed.");
+} else {
+  console.log(`${failures} hud money check(s) FAILED.`);
+}
+process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((error) => {
+  console.error(`hud money harness crashed: ${error && error.stack ? error.stack : error}`);
+  process.exit(1);
+});
+}
+
+// ======== resource body (the host loads this; harness mode skips it) ========
+if (!__offline) {
 // hmp-hud - server coordinator.
 //
 // The HUD is inactive until hmp-spawn reports a completed spawn (`hmp:spawn:complete`), which fires
@@ -14,7 +242,7 @@
     console.error("[hmp-hud] hmp-lib is required");
     return;
   }
-  const logger = Hmp.logger.create("hmp-hud");
+  const logger = Hmp.logger.create("cah-hud");
 
   function optionalImport(name) {
     try {
@@ -28,12 +256,15 @@
   const progressionResource = optionalImport("hmp-progression");
   const worldResource = optionalImport("hmp-world");
   const blipsResource = optionalImport("hmp-blips");
+  const bankingResource = optionalImport("hmp-banking");
+  const housesResource = optionalImport("hmp-houses");
 
   if (!core) logger.warn("hmp-core is unavailable: sessions and character metadata are disabled");
   if (!inventoryResource) logger.warn("hmp-inventory is unavailable: money and inventory space are hidden");
   if (!progressionResource) logger.warn("hmp-progression is unavailable: level, XP and derived school year are hidden");
   if (!worldResource) logger.warn("hmp-world is unavailable: clock, weather, calendar and the class timetable are hidden");
   if (!blipsResource) logger.warn("hmp-blips is unavailable: the class map blip is disabled");
+  if (!housesResource) logger.warn("hmp-houses is unavailable: the house crest widget shows the mystery crest");
 
   const messageOf = (error) => (error instanceof Error ? error.message : String(error));
 
@@ -177,14 +408,17 @@
     const defaults = {
       updateIntervalMs: 1000,
       inventoryRefreshMs: 10000,
-      money: { enabled: true, item: "native:galleons", label: "Galeões" },
+      money: { enabled: true, source: "auto", currency: "galleons", item: "native:galleons", label: "Galeões" },
       inventory: { enabled: true, metric: "slots" },
       health: { enabled: true, max: 100 },
       xp: { enabled: true },
       nametag: { useCharacterName: true },
-      keybinds: { inventoryToggle: true, inventoryKey: "tab" },
-      chat: { enabled: true, openKey: "t" },
-      gameMenus: { enabled: true, mode: "pause", pages: [], toolWheel: false, actionScreen: false },
+      nametags: {
+        enabled: true, range: 12000, tickMs: 150, showSelf: true, occlusion: false,
+        height: 185, selfHeight: 185, maxMarkers: 32, fontScale: 1, fov: 0, flipYaw: false, flipPitch: false,
+      },
+      chat: { enabled: true, openKey: "enter" },
+      gameMenus: { enabled: true, mode: "pause", pages: ["spells"], toolWheel: false, actionScreen: false },
       gameHud: { enabled: true, keepGroups: ["map"] },
       menu: { enabled: true, command: "menu" },
       year: {
@@ -194,6 +428,7 @@
         tests: { enabled: true, command: "teste", talentPrefix: "class-", requirements: [] },
       },
       classes: { enabled: true, showBlip: true, items: [] },
+      admins: { enabled: true, players: [] },
     };
     const loaded = Hmp.config.load(process.env.HMP_HUD_CONFIG || "data/hmp-hud.json", {
       cwd: process.cwd(),
@@ -213,22 +448,33 @@
     const health = loaded.health || {};
     const xp = loaded.xp || {};
     const nametag = loaded.nametag || {};
-    const keybinds = loaded.keybinds || {};
+    const nametags = loaded.nametags || loaded.nametag || {};
     const chat = loaded.chat || {};
+    const keybinds = loaded.keybinds || {};
     const gameMenus = loaded.gameMenus || {};
     const gameHud = loaded.gameHud || {};
     const menu = loaded.menu || {};
     const year = loaded.year || {};
     const classes = loaded.classes || {};
+    const admins = loaded.admins || {};
     const keepGroups = Array.isArray(gameHud.keepGroups)
       ? gameHud.keepGroups.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean)
       : ["map"];
+    // `native` reads the in-game wallet, `bank` the hmp-banking account, and
+    // `auto` prefers the wallet: that is the ledger the economy actually moves
+    // (hmp-wardrobe, hmp-shops and hmp-business all charge native:galleons), so
+    // reading it is what keeps the number on screen in step with buying and
+    // selling.
+    const rawMoneySource = String(money.source || "auto").trim().toLowerCase();
+    const moneySource = ["native", "bank", "auto"].includes(rawMoneySource) ? rawMoneySource : "auto";
     return {
       updateIntervalMs: clampNumber(loaded.updateIntervalMs, 250, 60000, 1000),
       inventoryRefreshMs: clampNumber(loaded.inventoryRefreshMs, 0, 3600000, 10000),
       money: {
-        enabled: money.enabled !== false && !!inventoryResource,
+        enabled: money.enabled !== false && !!(inventoryResource || bankingResource),
+        source: moneySource,
         item: String(money.item || "native:galleons"),
+        currency: String(money.currency || "galleons").slice(0, 32),
         label: String(money.label || "Galeões").slice(0, 24),
       },
       inventory: {
@@ -243,13 +489,49 @@
       nametag: {
         useCharacterName: nametag.useCharacterName !== false,
       },
-      keybinds: {
-        inventoryToggle: keybinds.inventoryToggle !== false && !!inventoryResource,
-        inventoryKey: String(keybinds.inventoryKey || "tab").trim().toLowerCase().slice(0, 16) || "tab",
+      // The hold-hide key: holding it steps the HUD aside (the game's item
+      // wheel lives on TAB by default). The inventory toggle key belongs to
+      // hmp-inventory (ui.key, default I) and is never bound here, so the two
+      // never race on the same edge.
+      keybinds: { hudHoldKey: "tab" },
+      // The nametag overlay feed: which players get drawn above their heads,
+      // how far the markers reach and how often positions stream. `nametags`
+      // replaces the old dormant `nametag` key (still accepted as an alias).
+      nametags: {
+        enabled: nametags.enabled !== false,
+        // 30 m floor: every player nearby must be named at classroom-wing
+        // distance, whatever a half-tuned config file says.
+        range: clampNumber(nametags.range, 3000, 20000, 12000),
+        tickMs: clampNumber(nametags.tickMs, 60, 2000, 150),
+        showSelf: nametags.showSelf !== false,
+        // Off by default: the marker belongs on top of the player it names —
+        // a wall between viewer and target must not delete the name. Set
+        // `nametags.occlusion: true` to bring the line-trace culling back.
+        occlusion: nametags.occlusion === true,
+        // Height above the GROUND: the card is terrain-anchored per player (a
+        // cached downward line trace), so the character origin's own height
+        // (pelvis vs feet per build) never pushes the card off the head.
+        height: clampNumber(nametags.height, 50, 500, 185),
+        // Own card override; falls back to height when unset.
+        selfHeight: clampNumber(nametags.selfHeight, 50, 500, 185),
+        maxMarkers: Math.trunc(clampNumber(nametags.maxMarkers, 1, 64, 32)),
+        fontScale: clampNumber(nametags.fontScale, 0.5, 2.5, 1),
+        fov: clampNumber(nametags.fov, 0, 179, 0),
+        flipYaw: nametags.flipYaw === true,
+        flipPitch: nametags.flipPitch === true,
       },
       chat: {
         enabled: chat.enabled !== false,
         openKey: String(chat.openKey || "t").trim().toLowerCase().slice(0, 16) || "t",
+      },
+      // The hold-hide key: holding it steps the HUD aside so the game's own
+      // item wheel is unobstructed. The inventory toggle key belongs to
+      // hmp-inventory (ui.key) and is never bound here. An empty string
+      // disables the hold-hide.
+      keybinds: {
+        hudHoldKey: keybinds.hudHoldKey === undefined
+          ? "tab"
+          : String(keybinds.hudHoldKey).trim().toLowerCase().slice(0, 16),
       },
       gameMenus: {
         enabled: gameMenus.enabled !== false,
@@ -279,6 +561,12 @@
         showBlip: classes.showBlip !== false,
         items: normalizeClassItems(classes.items),
       },
+      admins: {
+        enabled: admins.enabled !== false,
+        players: Array.isArray(admins.players)
+          ? admins.players.map((name) => String(name).trim().toLowerCase()).filter(Boolean)
+          : [],
+      },
     };
   }
 
@@ -306,13 +594,80 @@
     return Number.isFinite(parsed) && parsed >= 1 && parsed <= 1000 ? parsed : null;
   }
 
+  // Reading health on this host: the vitals view (hmp-pvp's `vitals` export,
+  // else the native Pvp.getVitals(id) -> { hp, max }) is the value the PvP
+  // policy arbitrates on and the only source reported whenever health actually
+  // changes — hmp-death reads it through the same chain. The reader is resolved
+  // lazily and retried, so it does not matter whether hmp-pvp finished starting
+  // before this resource. `player.health` is only a last resort: the build may
+  // not expose it to scripts at all, which left every nametag health bar stuck
+  // hidden at full.
+  let ntVitalsReader = null;
+  function ntVitalsView(id) {
+    if (!Number.isSafeInteger(id) || id < 0) return null;
+    if (!ntVitalsReader) {
+      try {
+        const pvp = Imports.get("hmp-pvp");
+        if (pvp && typeof pvp.vitals === "function") ntVitalsReader = (wanted) => pvp.vitals(wanted);
+      } catch (_) {
+        /* not available (yet) */
+      }
+      if (!ntVitalsReader) {
+        try {
+          if (typeof Pvp !== "undefined" && Pvp && typeof Pvp.getVitals === "function") {
+            ntVitalsReader = (wanted) => Pvp.getVitals(wanted);
+          }
+        } catch (_) {
+          /* no native either */
+        }
+      }
+      if (!ntVitalsReader) return null;
+    }
+    try {
+      const view = ntVitalsReader(id);
+      return view !== null && view !== undefined ? view : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntVitalsHp(id) {
+    const view = ntVitalsView(id);
+    if (!view) return null;
+    const hp = Number(typeof view === "object" ? view.hp : view);
+    return Number.isFinite(hp) && hp >= 0 ? Math.round(hp * 10) / 10 : null;
+  }
+
+  function ntVitalsMax(id) {
+    const view = ntVitalsView(id);
+    if (!view || typeof view !== "object") return null;
+    const max = Number(view.max);
+    return Number.isFinite(max) && max > 0 ? Math.round(max * 10) / 10 : null;
+  }
+
   function readHealth(player) {
+    const id = player && player.id;
+    if (Number.isSafeInteger(id)) {
+      const vitals = ntVitalsHp(id);
+      if (vitals !== null) return vitals;
+    }
     try {
       const raw = player.health;
       const value = typeof raw === "number" ? raw : Number(raw);
       if (Number.isFinite(value) && value >= 0) return Math.round(value * 10) / 10;
     } catch (_) {
       // The Framework build may not expose player health to scripts.
+    }
+    return null;
+  }
+
+  // The pawn's real maximum from the same vitals view; the configured
+  // health.max is only a fallback for builds without it.
+  function readHealthMax(player) {
+    const id = player && player.id;
+    if (Number.isSafeInteger(id)) {
+      const max = ntVitalsMax(id);
+      if (max !== null) return max;
     }
     return null;
   }
@@ -397,7 +752,7 @@
     if (!blipState.signature) return;
     blipState.signature = "";
     try {
-      if (blipsResource && blipsResource.markers) blipsResource.markers.remove(BLIP_ID, "hmp-hud");
+      if (blipsResource && blipsResource.markers) blipsResource.markers.remove(BLIP_ID, "cah-hud");
     } catch (_) {
     }
   }
@@ -438,7 +793,7 @@
     blipState.signature = signature;
     try {
       await blipsResource.markers.upsert({
-        resource: "hmp-hud",
+        resource: "cah-hud",
         id: BLIP_ID,
         kind: "marker",
         position: item.position,
@@ -620,7 +975,56 @@
     };
   }
 
+  // Money is the number the player can actually spend. Everything that charges
+  // the player - hmp-wardrobe, hmp-shops, hmp-business - moves native:galleons,
+  // so that is the ledger worth showing; the hmp-banking account is only a
+  // fallback for setups that run without hmp-inventory.
+  async function readMoney(player) {
+    const { source, item, currency } = config.money;
+    const wantsNative = source === "native" || (source === "auto" && !!inventoryResource);
+    if (wantsNative && inventoryResource && inventoryResource.inventory) {
+      try {
+        const amount = Number(await inventoryResource.inventory.count(player, item));
+        if (Number.isFinite(amount)) return Math.max(0, Math.trunc(amount));
+      } catch (error) {
+        logger.warn(`[hmp-hud] Failed to read ${item}: ${messageOf(error)}`);
+        if (source === "native") return null;
+      }
+    }
+    if (source === "native") return null;
+    if (bankingResource && bankingResource.accounts) {
+      try {
+        const account = await bankingResource.accounts.personal(player, currency);
+        const balance = account ? Number(account.balance) : NaN;
+        if (Number.isFinite(balance)) return Math.max(0, Math.trunc(balance));
+        logger.warn(`[hmp-hud] Bank balance non-finite: ${account && account.balance}`);
+      } catch (error) {
+        logger.warn(`[hmp-hud] Failed to read bank balance: ${messageOf(error)}`);
+      }
+    }
+    return null;
+  }
+
   // parts: character -> world -> xp -> year -> classes -> money -> inventory -> health -> layout
+  const HOUSE_TTL_MS = 10000;
+  async function readHouse(player, entry) {
+    if (!housesResource || !housesResource.membership || !housesResource.membership.get) return null;
+    const now = Date.now();
+    // Cheap TTL: the crest rarely changes, so skip the DB read unless it is
+    // stale or a hmp:houses:changed event forced a refresh (houseReadAt = 0).
+    if (entry.houseReadAt && now - entry.houseReadAt < HOUSE_TTL_MS) return entry.cache.house;
+    entry.houseReadAt = now;
+    try {
+      const character = entry.cache.character || (core && core.characters ? core.characters.active(player) : null);
+      if (!character || !character.id) return null;
+      const membership = await housesResource.membership.get(character.id);
+      const house = membership && membership.house ? String(membership.house).toLowerCase() : "";
+      return house ? { house: house } : null;
+    } catch (_) {
+      return entry.cache.house || null;
+    }
+  }
+
   async function applyParts(player, entry, parts) {
     const wants = (name) => parts.has(name);
     if (wants("character") || wants("year")) {
@@ -634,8 +1038,10 @@
       entry.cache.world = null;
       if (worldResource && worldResource.environment) {
         try {
-          entry.cache.world = normalizeWorld(worldResource.environment.state());
-        } catch (_) {
+          const wstate = worldResource.environment.state();
+          entry.cache.world = normalizeWorld(wstate);
+        } catch (error) {
+          logger.warn(`[hmp-hud] environment.state() failed: ${messageOf(error)}`);
           entry.cache.world = null;
         }
       }
@@ -659,22 +1065,12 @@
     if (wants("classes")) {
       entry.cache.classes = computeClasses(entry);
     }
-    if (wants("money") && config.money.enabled && inventoryResource && inventoryResource.inventory) {
-      try {
-        // Allow override via environment variable or config
-        const itemOverride = process.env.HMP_HUD_MONEY_ITEM || config.money.item;
-        const amount = await inventoryResource.inventory.count(player, itemOverride);
-        if (Number.isFinite(amount)) {
-          entry.cache.money = { amount, label: config.money.label };
-          logger.debug(`[hmp-hud] Money: item=${itemOverride}, amount=${amount}`);
-        } else {
-          entry.cache.money = null;
-          logger.warn(`[hmp-hud] Money count non-finite for item '${itemOverride}': ${amount}`);
-        }
-      } catch (_) {
-        entry.cache.money = null;
-        logger.warn(`[hmp-hud] Failed to get money count for item '${config.money.item}':`);
-      }
+    if (wants("house")) {
+      entry.cache.house = await readHouse(player, entry);
+    }
+    if (wants("money") && config.money.enabled) {
+      const balance = await readMoney(player);
+      entry.cache.money = balance === null ? null : { amount: balance, label: config.money.label };
     }
     if (wants("inventory") && config.inventory.enabled && inventoryResource && inventoryResource.inventory) {
       try {
@@ -739,6 +1135,7 @@
       test: cache.test || null,
       world: cache.world || null,
       classes: cache.classes || null,
+      house: cache.house || null,
     };
   }
 
@@ -798,13 +1195,281 @@
     for (const part of parts) if (!entry.dirtyParts.includes(part)) entry.dirtyParts.push(part);
   }
 
-  function forceHealthZero(player) {    const entry = entryFor(player && player.id);
+  function forceHealthZero(player) {
+    const entry = entryFor(player && player.id);
     if (!entry) return;
     entry.healthLocked = true;
     entry.healthLockedAt = Date.now();
     entry.cache.health = 0;
     void runRefresh(player, entry, new Set(["health"]), { force: true });
   }
+
+  // ---------------------------------------------------------------------------
+  // Nametag overlay feed: everything drawn in the marker above players' heads.
+  // The client drives this (server timers are unreliable in this host): it asks
+  // for a roster snapshot every config.nametags.tickMs while the HUD is up, and
+  // this side answers with the players near it - hmp-core CHARACTER names (never
+  // the Steam/Discord nickname), house, health, voice state and positions.
+  // ---------------------------------------------------------------------------
+  const ntNameCache = new Map();    // playerId -> { name, at }
+  const ntHouseCache = new Map();   // characterId -> { house, at }
+  const ntTalking = new Set();      // player ids currently talking (voice relay)
+  const ntLastSent = new Map();     // viewerId -> Set(targetId) of the last roster
+  const ntLastTick = new Map();     // viewerId -> last tick ms (rate limit)
+  const ntMarks = new Map();        // viewerId -> Map(targetId -> Set(mark))
+  const NT_NAME_TTL_MS = 15000;
+  const NT_HOUSE_TTL_MS = 60000;
+
+  function ntPlayers() {
+    try {
+      if (typeof PlayerManager !== "undefined" && PlayerManager && typeof PlayerManager.getAll === "function") {
+        return PlayerManager.getAll() || [];
+      }
+    } catch (_) {
+    }
+    try {
+      if (Hmp && Hmp.player && typeof Hmp.player.all === "function") return Hmp.player.all() || [];
+    } catch (_) {
+    }
+    return [];
+  }
+
+  function ntLocation(player) {
+    if (!player || typeof player.location !== "function") return null;
+    try {
+      return player.location() || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntCharacterName(player) {
+    const id = player && player.id;
+    if (!Number.isSafeInteger(id)) return null;
+    const now = Date.now();
+    const cached = ntNameCache.get(id);
+    if (cached && now - cached.at < NT_NAME_TTL_MS) return cached.name;
+    let name = null;
+    if (core && core.characters && typeof core.characters.active === "function") {
+      try {
+        const character = core.characters.active(player);
+        if (character && character.name) name = String(character.name).trim().slice(0, 48) || null;
+      } catch (_) {
+      }
+    }
+    // No character (still in selection, for instance): fall back to the platform
+    // nickname rather than drawing an empty card.
+    if (!name) {
+      try {
+        if (player.nickname) name = String(player.nickname).trim().slice(0, 48) || null;
+      } catch (_) {
+      }
+    }
+    ntNameCache.set(id, { name, at: now });
+    return name;
+  }
+
+  function ntHouseFor(characterId) {
+    if (!Number.isSafeInteger(characterId) || !housesResource || !housesResource.membership ||
+        typeof housesResource.membership.get !== "function") return Promise.resolve(null);
+    const now = Date.now();
+    const cached = ntHouseCache.get(characterId);
+    if (cached && now - cached.at < NT_HOUSE_TTL_MS) return Promise.resolve(cached.house);
+    return housesResource.membership.get(characterId).then((membership) => {
+      const house = membership && membership.house ? String(membership.house).toLowerCase().slice(0, 16) : null;
+      ntHouseCache.set(characterId, { house, at: Date.now() });
+      return house;
+    }).catch(() => {
+      const stale = ntHouseCache.get(characterId);
+      return stale ? stale.house : null;
+    });
+  }
+
+  function ntVoiceEnabled(player) {
+    if (typeof Voice === "undefined" || !Voice || typeof Voice.isPlayerVoiceEnabled !== "function") return null;
+    try {
+      return Voice.isPlayerVoiceEnabled(player) === true;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ntIsTalking(player) {
+    if (!player || !Number.isSafeInteger(player.id)) return false;
+    if (ntTalking.has(player.id)) return true;
+    if (typeof Voice !== "undefined" && Voice && typeof Voice.isPlayerTalking === "function") {
+      try {
+        return Voice.isPlayerTalking(player) === true;
+      } catch (_) {
+      }
+    }
+    return false;
+  }
+
+  function ntMarksFor(viewerId, targetId) {
+    const perViewer = ntMarks.get(viewerId);
+    if (!perViewer) return [];
+    const set = perViewer.get(targetId);
+    return set ? [...set] : [];
+  }
+
+  async function ntBuildRoster(viewer) {
+    const viewerId = viewer && viewer.id;
+    if (!Number.isSafeInteger(viewerId)) return { upserts: [], removed: [] };
+    const origin = ntLocation(viewer);
+    const now = Date.now();
+    if (!origin || !Number.isFinite(origin.x)) {
+      const previous = ntLastSent.get(viewerId) || new Set();
+      ntLastSent.set(viewerId, new Set());
+      return { upserts: [], removed: [...previous] };
+    }
+    const range = config.nametags.range;
+    const rangeSq = range * range;
+    const candidates = [];
+    for (const other of ntPlayers()) {
+      if (!other || other.connected === false || other.id === viewerId) continue;
+      const world = [other.virtualWorld, viewer.virtualWorld];
+      if (Number.isFinite(Number(world[0])) && Number.isFinite(Number(world[1])) &&
+          Number(world[0]) !== Number(world[1])) continue;
+      const position = ntLocation(other);
+      if (!position || !Number.isFinite(position.x)) continue;
+      const dx = position.x - origin.x, dy = position.y - origin.y, dz = position.z - origin.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq > rangeSq) continue;
+      candidates.push({ player: other, position, distSq });
+    }
+    candidates.sort((left, right) => left.distSq - right.distSq);
+    if (candidates.length > config.nametags.maxMarkers) candidates.length = config.nametags.maxMarkers;
+
+    const upserts = [];
+    const seen = new Set();
+    for (const candidate of candidates) {
+      const target = candidate.player;
+      const name = ntCharacterName(target);
+      if (!name) continue;
+      seen.add(target.id);
+      let house = null;
+      if (core && core.characters && typeof core.characters.active === "function") {
+        try {
+          const character = core.characters.active(target);
+          if (character && character.id) house = await ntHouseFor(character.id);
+        } catch (_) {
+        }
+      }
+      const health = readHealth(target);
+      const healthMax = readHealthMax(target) || (health !== null ? config.health.max : null);
+      const voice = ntVoiceEnabled(target);
+      upserts.push({
+        i: target.id,
+        n: name,
+        h: house || null,
+        hp: health,
+        hm: healthMax,
+        v: voice === null ? null : (voice ? 1 : 0),
+        t: ntIsTalking(target) ? 1 : 0,
+        m: ntMarksFor(viewerId, target.id),
+        x: Math.round(candidate.position.x * 10) / 10,
+        y: Math.round(candidate.position.y * 10) / 10,
+        z: Math.round(candidate.position.z * 10) / 10,
+      });
+    }
+
+    const previous = ntLastSent.get(viewerId) || new Set();
+    const removed = [];
+    for (const id of previous) {
+      if (!seen.has(id)) removed.push(id);
+    }
+    ntLastSent.set(viewerId, seen);
+    return { upserts, removed };
+  }
+
+  Events.onClient("hmp-hud:nametags-tick", (player) => {
+    if (!config.nametags.enabled) return;
+    const viewerId = player && player.id;
+    if (!Number.isSafeInteger(viewerId)) return;
+    if (!tracked.has(viewerId)) return; // no HUD session, no marker feed
+    const now = Date.now();
+    const last = ntLastTick.get(viewerId) || 0;
+    if (now - last < config.nametags.tickMs * 0.75) return; // client-driven rate limit
+    ntLastTick.set(viewerId, now);
+    ntBuildRoster(player).then((roster) => {
+      if (roster.upserts.length || roster.removed.length) send(player, "hmp-hud:nametags-roster", roster);
+    }).catch((error) => {
+      logger.warn(`Nametag roster failed for #${viewerId}: ${messageOf(error)}`);
+    });
+  });
+
+  // Voice relay: the client cannot see who else is talking, so the server
+  // forwards the engine's voice events into the talking set the roster reads.
+  Events.on("playerVoiceStart", (player) => {
+    if (player && Number.isSafeInteger(player.id)) ntTalking.add(player.id);
+  });
+  Events.on("playerVoiceStop", (player) => {
+    if (player && Number.isSafeInteger(player.id)) ntTalking.delete(player.id);
+  });
+
+  // Per-viewer marks: another resource (hmp-schedule curfew breakers) pins a
+  // glyph on a player for one viewer. Relayed at once; re-sent with the roster.
+  Exports.register("setNametagMark", (viewer, targetId, mark, on) => {
+    if (!config.nametags.enabled) return false;
+    const viewerId = viewer && viewer.id;
+    if (!Number.isSafeInteger(viewerId) || !Number.isSafeInteger(Number(targetId))) return false;
+    const clean = String(mark || "").trim().slice(0, 16);
+    if (!clean) return false;
+    const target = Number(targetId);
+    let perViewer = ntMarks.get(viewerId);
+    if (!perViewer) {
+      perViewer = new Map();
+      ntMarks.set(viewerId, perViewer);
+    }
+    let set = perViewer.get(target);
+    if (!set) {
+      set = new Set();
+      perViewer.set(target, set);
+    }
+    if (on === false) {
+      set.delete(clean);
+      if (!set.size) perViewer.delete(target);
+    } else {
+      set.add(clean);
+    }
+    send(viewer, "hmp-hud:nametags-mark", { playerId: target, mark: clean, on: on !== false });
+    return true;
+  });
+
+  function ntPurgePlayer(playerId) {
+    if (!Number.isSafeInteger(playerId)) return;
+    ntNameCache.delete(playerId);
+    ntLastSent.delete(playerId);
+    ntLastTick.delete(playerId);
+    ntMarks.delete(playerId);
+    ntTalking.delete(playerId);
+  }
+
+  function ntConfigForClient() {
+    return {
+      enabled: config.nametags.enabled,
+      range: config.nametags.range,
+      tickMs: config.nametags.tickMs,
+      showSelf: config.nametags.showSelf,
+      occlusion: config.nametags.occlusion,
+      height: config.nametags.height,
+      selfHeight: config.nametags.selfHeight,
+      maxMarkers: config.nametags.maxMarkers,
+      fontScale: config.nametags.fontScale,
+      fov: config.nametags.fov,
+      flipYaw: config.nametags.flipYaw,
+      flipPitch: config.nametags.flipPitch,
+    };
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // The inventory toggle key belongs to hmp-inventory (its ui.key, default I,
+  // bound in its own client and rate-limited there). This resource only binds
+  // the HOLD key that steps the HUD aside for the game's item wheel; its value
+  // reaches the client through hmp-hud:keybinds below.
+  // ---------------------------------------------------------------------------
 
   async function activate(payload) {
     const player = payload && payload.session ? payload.session.player : null;
@@ -814,10 +1479,14 @@
     const entry = { cache: {}, pushed: "", pending: null, dirtyParts: [], pendingShow: false, playerId: player.id };
     tracked.set(player.id, entry);
     await loadLayout(player);
+    send(player, "hmp-hud:nametags-config", ntConfigForClient());
+    send(player, "hmp-hud:keybinds", {
+      hudHoldKey: config.keybinds.hudHoldKey,
+    });
     await runRefresh(
       player,
       entry,
-      new Set(["character", "world", "xp", "year", "test", "classes", "money", "inventory", "health", "layout"]),
+      new Set(["character", "world", "xp", "year", "test", "classes", "house", "money", "inventory", "health", "layout"]),
       { show: true, force: true },
     );
     logger.debug(`HUD shown for #${player.id}`);
@@ -833,25 +1502,12 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Periodic tick: cheap live values (health, money) + clock/weather/timetable
+  // Periodic refresh is CLIENT-DRIVEN: the client sends "hmp-hud:tick" every
+  // ~1s while the HUD is visible (see the Events.onClient handler below).
+  // Server-side timers are unreliable in this host (they fire at most once), so
+  // we deliberately don't rely on setInterval/setTimeout for periodic work.
   // ---------------------------------------------------------------------------
   let lastInventorySweep = 0;
-  const tickTimer = setInterval(() => {
-    const sweep = config.inventoryRefreshMs > 0 && Date.now() - lastInventorySweep >= config.inventoryRefreshMs;
-    if (sweep) lastInventorySweep = Date.now();
-    for (const [id, entry] of [...tracked]) {
-      const session = core && core.sessions ? core.sessions.get(id) : null;
-      if (!session || !session.player) {
-        tracked.delete(id);
-        continue;
-      }
-      const parts = new Set(["health", "money", "world", "classes"]);
-      for (const part of entry.dirtyParts.splice(0)) parts.add(part);
-      if (sweep) parts.add("inventory");
-      void runRefresh(session.player, entry, parts, {});
-    }
-  }, config.updateIntervalMs);
-  if (typeof tickTimer.unref === "function") tickTimer.unref();
 
   // ---------------------------------------------------------------------------
   // Lifecycle events
@@ -867,6 +1523,14 @@
     hideFor(payload.player);
     if (payload.player && Number.isSafeInteger(payload.player.id)) tracked.delete(payload.player.id);
   });
+  // The nametag caches key on live player ids; drop them as sessions end so a
+  // rejoining player never inherits a stale name or mark.
+  Events.on("hmp:character:unloading", (payload) => {
+    if (payload && payload.session && payload.session.player) ntPurgePlayer(payload.session.player.id);
+  });
+  Events.on("hmp:session:ended", (payload) => {
+    if (payload && payload.player) ntPurgePlayer(payload.player.id);
+  });
   Events.on("hmp:inventory:changed", (payload) => markDirty(payload && payload.player, ["inventory", "money"]));
   Events.on("hmp:progression:changed", (payload) => markDirty(payload && payload.player, ["xp", "year", "test"]));
   Events.on("playerDied", (player) => forceHealthZero(player));
@@ -877,25 +1541,232 @@
     entry.healthLocked = false;
     void runRefresh(player, entry, new Set(["health"]), { force: true });
   });
-  // ---------------------------------------------------------------------------
-  // Inventory toggle key (hmp-hud:inventory-toggle from the client TAB shortcut)
-  // ---------------------------------------------------------------------------
-  const toggleLimit = Hmp.rateLimit.create({ limit: 4, windowMs: 2000 });
 
-  Events.onClient("hmp-hud:inventory-toggle", async (player) => {
-    if (!config.keybinds.inventoryToggle || !inventoryResource || !inventoryResource.ui) return;
-    if (!toggleLimit.allow(player && player.id)) return;
-    const session = core && core.sessions ? core.sessions.get(player) : null;
-    if (!session) return;
-    if (!core.characters.active(player)) return; // no inventory without an active character
+  // ---------------------------------------------------------------------------
+  // Chat handling: forward framework chat events to HUD clients, and handle
+  // messages sent from the HUD input.
+  // ---------------------------------------------------------------------------
+  const chatHistory = new Map(); // playerId -> array of recent messages
+  const MAX_HISTORY = 50;
+
+  function addToHistory(playerId, message) {
+    const history = chatHistory.get(playerId) || [];
+    history.push(message);
+    if (history.length > MAX_HISTORY) history.shift();
+    chatHistory.set(playerId, history);
+  }
+
+  function getHistory(playerId) {
+    return chatHistory.get(playerId) || [];
+  }
+
+  function sendChatToPlayer(player, message) {
+    if (!player || typeof player.emit !== 'function') return;
     try {
-      if (inventoryResource.ui.isOpen(player)) {
-        inventoryResource.ui.close(player);
-      } else {
-        await inventoryResource.ui.open(player);
+      player.emit("hmp-hud:chat", JSON.stringify({ messages: [message] }));
+    } catch (_) {}
+  }
+
+  function broadcastChat(message) {
+    if (!core || !core.sessions) return;
+    for (const [id, entry] of tracked) {
+      const session = core.sessions.get(id);
+      if (session && session.player) sendChatToPlayer(session.player, message);
+    }
+  }
+
+  // Listen for framework chat events (player chat, system messages, etc.)
+  Events.on("chatMessage", (payload) => {
+    if (!payload) return;
+    const message = {
+      author: payload.author || payload.player?.nickname || 'System',
+      text: payload.text || payload.message || '',
+      channel: payload.channel || 'local',
+      timestamp: Date.now(),
+    };
+    // Add to history for the sender if it's a player
+    if (payload.player && payload.player.id) {
+      addToHistory(payload.player.id, message);
+    }
+    // Broadcast to all tracked players
+    broadcastChat(message);
+  });
+
+  // Also listen for common alternative chat event names
+  Events.on("playerChat", (payload) => {
+    if (!payload) return;
+    const message = {
+      author: payload.author || payload.player?.nickname || 'Player',
+      text: payload.text || payload.message || '',
+      channel: payload.channel || 'local',
+      timestamp: Date.now(),
+    };
+    if (payload.player && payload.player.id) {
+      addToHistory(payload.player.id, message);
+    }
+    broadcastChat(message);
+  });
+
+  // Listen for system messages (server announcements, etc.)
+  Events.on("systemMessage", (payload) => {
+    if (!payload) return;
+    const message = {
+      author: 'Sistema',
+      text: payload.text || payload.message || '',
+      channel: 'system',
+      timestamp: Date.now(),
+    };
+    broadcastChat(message);
+  });
+
+  // Handle chat messages sent from the HUD input
+  Events.onClient("hmp-hud:chat-send", (player, raw) => {
+    if (!player || !config.chat.enabled) return;
+    let data = null;
+    try {
+      data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (_) {
+      return;
+    }
+    const text = String(data?.text || "").trim().slice(0, 256);
+    if (!text) return;
+    // Forward to framework chat system (this will trigger chatMessage event)
+    try {
+      Events.emitServer("chat:send", JSON.stringify({ player: player.id, text: text }));
+    } catch (_) {
+      // Fallback: just broadcast locally
+      const message = {
+        author: player.nickname || 'Player',
+        text: text,
+        channel: 'local',
+        timestamp: Date.now(),
+      };
+      broadcastChat(message);
+    }
+  });
+
+  // Handle chat open/close from client
+  Events.onClient("hmp-hud:chat-open", (player) => {
+    // Send recent history when chat opens
+    const history = getHistory(player && player.id);
+    if (history.length) {
+      try {
+        player.emit("hmp-hud:chat", JSON.stringify({ messages: history }));
+      } catch (_) {}
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Admin logging: capture server console/logs and forward to admin players
+  // ---------------------------------------------------------------------------
+  const adminLoggers = new Map(); // admin playerId -> { enabled: true, level: 'all'|'warn'|'error' }
+  const adminLogBuffer = []; // circular buffer of recent admin logs
+  const ADMIN_LOG_MAX = 200;
+
+  function isAdmin(player) {
+    if (!player) return false;
+    // Check config.admins.players list first (nickname-based)
+    if (config.admins && config.admins.enabled && config.admins.players) {
+      const nickname = String(player.nickname || '').trim().toLowerCase();
+      if (nickname && config.admins.players.includes(nickname)) return true;
+    }
+    // Fallback to group-based check
+    if (!core || !core.groups) return false;
+    try {
+      return core.groups.has(player, 'admin', 1) || core.groups.has(player, 'admin', 2) || core.groups.has(player, 'admin', 3);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function addAdminLog(entry) {
+    const log = {
+      author: entry.author || 'Console',
+      text: entry.text || '',
+      channel: entry.channel || 'console', // 'console' or 'admin'
+      timestamp: Date.now(),
+    };
+    adminLogBuffer.push(log);
+    if (adminLogBuffer.length > ADMIN_LOG_MAX) adminLogBuffer.shift();
+    // Forward to all admin players
+    if (core && core.sessions) {
+      for (const [id, session] of core.sessions.all()) {
+        if (session.player && isAdmin(session.player)) {
+          sendAdminLogToPlayer(session.player, log);
+        }
       }
-    } catch (error) {
-      logger.warn(`Inventory toggle failed for #${player && player.id}: ${messageOf(error)}`);
+    }
+  }
+
+  function sendAdminLogToPlayer(player, log) {
+    if (!player || typeof player.emit !== 'function') return;
+    try {
+      player.emit("hmp-hud:admin-log", JSON.stringify({ entry: log }));
+    } catch (_) {}
+  }
+
+  // Override console methods to capture logs
+  const originalConsoleLog = console.log;
+  const originalConsoleWarn = console.warn;
+  const originalConsoleError = console.error;
+
+  console.log = function (...args) {
+    originalConsoleLog.apply(console, args);
+    addAdminLog({ author: 'Console', text: args.map(a => String(a)).join(' '), channel: 'console' });
+  };
+  console.warn = function (...args) {
+    originalConsoleWarn.apply(console, args);
+    addAdminLog({ author: 'Console', text: args.map(a => String(a)).join(' '), channel: 'console' });
+  };
+  console.error = function (...args) {
+    originalConsoleError.apply(console, args);
+    addAdminLog({ author: 'Console', text: args.map(a => String(a)).join(' '), channel: 'console' });
+  };
+
+  // Admin log command: /hud adminlog on|off|level
+  const adminLogCommands = Hmp.command.createRouter({ prefix: "[hud]", logger });
+  adminLogCommands.register("adminlog", {
+    description: "Toggle admin log capture or set level.",
+    usage: "/hud adminlog on|off|level <all|warn|error>",
+  }, (context) => {
+    if (!isAdmin(context.player)) return context.reply("Apenas administradores.");
+    const sub = String(context.args[0] || "").trim().toLowerCase();
+    if (sub === "on") {
+      adminLoggers.set(context.player.id, { enabled: true, level: 'all' });
+      // Send recent buffer
+      for (const log of adminLogBuffer.slice(-20)) {
+        sendAdminLogToPlayer(context.player, log);
+      }
+      return context.reply("Admin log ativado. Últimas 20 entradas enviadas.");
+    }
+    if (sub === "off") {
+      adminLoggers.delete(context.player.id);
+      return context.reply("Admin log desativado.");
+    }
+    if (sub === "level") {
+      const level = String(context.args[1] || "").trim().toLowerCase();
+      if (!['all', 'warn', 'error'].includes(level)) {
+        return context.reply("Nível inválido. Use: all, warn, error");
+      }
+      const current = adminLoggers.get(context.player.id) || { enabled: true, level: 'all' };
+      current.level = level;
+      adminLoggers.set(context.player.id, current);
+      return context.reply(`Nível do admin log: ${level}`);
+    }
+    return context.reply("Uso: /hud adminlog on|off|level <all|warn|error>");
+  });
+
+  Events.on("chatCommand", adminLogCommands.handle);
+
+  // Send admin log buffer to new admin players when they spawn
+  Events.on("hmp:spawn:complete", (payload) => {
+    const player = payload && payload.session ? payload.session.player : null;
+    if (player && isAdmin(player)) {
+      setTimeout(() => {
+        for (const log of adminLogBuffer.slice(-30)) {
+          sendAdminLogToPlayer(player, log);
+        }
+      }, 1000);
     }
   });
 
@@ -946,13 +1817,6 @@
   Events.onClient("hmp-hud:client-ready", (player) => {
     try {
       player.emit(
-        "hmp-hud:keybinds",
-        JSON.stringify({
-          inventoryToggle: config.keybinds.inventoryToggle,
-          inventoryKey: config.keybinds.inventoryKey,
-        }),
-      );
-      player.emit(
         "hmp-hud:gamehud",
         JSON.stringify({
           enabled: config.gameHud.enabled,
@@ -976,6 +1840,47 @@
           actionScreen: config.gameMenus.actionScreen,
         }),
       );
+      player.emit("hmp-hud:nametags-config", JSON.stringify(ntConfigForClient()));
+    } catch (_) {
+    }
+  });
+
+  // Client-driven periodic refresh. Server-side timers are unreliable in this
+  // host (they fire at most once), so the client pokes us every ~1s while the
+  // HUD is visible. runRefresh only pushes when the state actually changed.
+  Events.onClient("hmp-hud:tick", (player) => {
+    const entry = entryFor(player && player.id);
+    if (!entry) return;
+    const parts = new Set(["health", "money", "world", "classes", "house"]);
+    if (config.inventoryRefreshMs > 0 && Date.now() - lastInventorySweep >= config.inventoryRefreshMs) {
+      lastInventorySweep = Date.now();
+      parts.add("inventory");
+    }
+    void runRefresh(player, entry, parts, {});
+  });
+
+  // House changes (admin assignment, /casa) refresh the crest immediately.
+  Events.on("hmp:houses:changed", (payload) => {
+    const player = payload && payload.player;
+    if (!player) return;
+    const entry = entryFor(player && player.id);
+    if (entry) entry.houseReadAt = 0;
+    markDirty(player, ["house"]);
+    // The overlay marker draws the crest too: drop the cached house so the next
+    // roster tick re-reads the membership.
+    if (core && core.characters && typeof core.characters.active === "function") {
+      try {
+        const character = core.characters.active(player);
+        if (character && character.id) ntHouseCache.delete(character.id);
+      } catch (_) {
+      }
+    }
+  });
+
+  // ESC card "Horário": ask hmp-schedule to open its guide for this player.
+  Events.onClient("hmp-hud:esc-schedule", (player) => {
+    try {
+      Events.emit("hmp-schedule:open-request", { player: player });
     } catch (_) {
     }
   });
@@ -1024,17 +1929,25 @@
   });
 
   Events.on("resourceStop", (name) => {
-    if (name && name !== "hmp-hud") return;
-    clearInterval(tickTimer);
+    if (name && name !== "cah-hud") return;
     tracked.clear();
     clearClassBlip();
+    ntNameCache.clear();
+    ntHouseCache.clear();
+    ntTalking.clear();
+    ntLastSent.clear();
+    ntLastTick.clear();
+    ntMarks.clear();
     try {
-      if (blipsResource && blipsResource.markers) blipsResource.markers.clear("hmp-hud");
+      if (blipsResource && blipsResource.markers) blipsResource.markers.clear("cah-hud");
     } catch (_) {
     }
   });
 
-  function forceHealthZero(player) {
+  // ---------------------------------------------------------------------------
+  // End-of-year test execution: shared by the /teste command and the "test" export.
+  // Passing persists the year override (green light); failing reports the gaps.
+  // ---------------------------------------------------------------------------
   async function applyYearOverride(player, year) {
     if (!core || !core.characters || !core.metadata) throw new Error("hmp-core is required for year overrides");
     const character = core.characters.active(player);
@@ -1100,10 +2013,6 @@
     updateIntervalMs: config.updateIntervalMs,
     world: !!worldResource,
     blips: !!blipsResource,
-    keybinds: {
-      inventoryToggle: config.keybinds.inventoryToggle,
-      inventoryKey: config.keybinds.inventoryKey,
-    },
     gameHud: {
       enabled: config.gameHud.enabled,
       keepGroups: config.gameHud.keepGroups.slice(),
@@ -1306,4 +2215,4 @@
       `native HUD ${config.gameHud.enabled ? `suppressed (keeps: ${config.gameHud.keepGroups.join(", ")})` : "untouched"}`,
   );
 })();
-
+}
